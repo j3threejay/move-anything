@@ -1,0 +1,41 @@
+{
+  "id": "slicer",
+  "name": "Slicer",
+  "abbrev": "SL",
+  "version": "0.1.0",
+  "dsp": "dsp.so",
+  "api_version": 2,
+  "capabilities": {
+    "audio_in": false,
+    "audio_out": true,
+    "midi_in": true,
+    "chainable": true,
+    "component_type": "sound_generator",
+    "ui_hierarchy": {
+      "levels": {
+        "root": {
+          "label": "Slicer",
+          "knobs": ["sensitivity", "slices", "pitch", "gain"],
+          "params": [
+            {"key": "sensitivity", "label": "Sensitivity", "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.01},
+            {"key": "slices", "label": "Slices", "type": "enum", "values": ["8", "16", "32", "64", "128"], "default": "16"},
+            {"key": "pitch", "label": "Pitch", "type": "float", "min": -24.0, "max": 24.0, "default": 0.0, "step": 0.5},
+            {"key": "gain", "label": "Gain", "type": "float", "min": 0.0, "max": 1.0, "default": 0.8, "step": 0.01},
+            {"level": "advanced", "label": "Advanced"}
+          ]
+        },
+        "advanced": {
+          "label": "Advanced",
+          "knobs": ["attack", "decay", "start_trim", "end_trim"],
+          "params": [
+            {"key": "mode", "label": "Mode", "type": "enum", "values": ["trigger", "gate"], "default": "trigger"},
+            {"key": "attack", "label": "Attack", "type": "float", "min": 0.0, "max": 500.0, "default": 5.0, "step": 1.0, "unit": "ms"},
+            {"key": "decay", "label": "Decay", "type": "float", "min": 0.0, "max": 2000.0, "default": 200.0, "step": 5.0, "unit": "ms"},
+            {"key": "start_trim", "label": "Start", "type": "float", "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.001},
+            {"key": "end_trim", "label": "End", "type": "float", "min": 0.0, "max": 1.0, "default": 1.0, "step": 0.001}
+          ]
+        }
+      }
+    }
+  }
+}
