@@ -88,6 +88,33 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **CC 51 (Back)** — reaches ui_chain.js cleanly.
 - **CC 3 (Jog Click), CC 14 (Jog rotate), CC 71–74 (Knobs 1–4)** — all pass through cleanly.
 
+## Move Hardware MIDI — Verified from extending-move wiki
+Full pad layout (Control Live mode):
+```
+R1 (top):    notes 92–99
+R2:          notes 84–91
+R3:          notes 76–83
+R4 (bottom): notes 68–75
+```
+32 pads total, notes 68–99. Octave shift transposes all pad notes by ±12.
+
+**Knob touch notes:** 0–7 for knobs 1–8 (Note On velocity 127 = touched, 0 = released).
+These collide with low note range — filter them out in `onMidiMessageInternal` by checking `byte1 <= 7 && (velocity === 127 || velocity === 0)`.
+
+## Note-to-Slice Mapping — Current Design
+**MIDI note number = slice index directly.**
+- Note 0 = slice 0, note 1 = slice 1, ... note 127 = slice 127
+- To use hardware pads: **octave down on Move until bottom-left pad sends note 0**
+- At minimum octave: R4C1=note0=slice0, R4C8=note7=slice7, R1C8=note31=slice31
+- Shift octave up to access higher slices (octave +1 → notes 12–43 → slices 12–43, etc.)
+- External MIDI controller sending notes 0+ works naturally with no offset needed
+
+## Transient Detection — Current Design
+- Always scans up to MAX_SLICES (128) transients — NOT capped by `slice_count`
+- `slice_count` is only used as fallback chunk size when zero transients are found
+- Threshold knob: lower = more sensitive = more slices detected
+- min_gap between markers = SAMPLE_RATE/32 (~1.4ms) to avoid false doubles
+
 ## Bugs Fixed
 - **WAV JUNK chunk**: Pro WAVs have a `JUNK` chunk before `fmt `. Old 44-byte flat reader → `channels=0` → silence. Fixed with proper RIFF chunk scanner.
 - **24-bit WAV**: Added support — reads 3 bytes/sample, shifts to 16-bit.
@@ -104,6 +131,8 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **End-of-slice hard cutoff causing tin-can ringing**: Replaced immediate `active=0` at slice end with a 64-sample (~1.5ms) linear release fade. Voice holds last frame at decaying amplitude until the countdown reaches zero.
 - **Back button exits chain UI**: `MoveBack` (CC51) is intercepted by the chain host and exits the component — cannot be used for in-component navigation.
 - **Attack/decay coefficients swapped in render_block**: `ENV_ATTACK` was using `v->env_attack` and `ENV_DECAY` was using `v->env_decay` — behavior was inverted on hardware. Fixed by swapping: `ENV_ATTACK` now uses `v->env_decay` and `ENV_DECAY` uses `v->env_attack` in the render loop.
+- **Slice detection capped at slice_count**: Was `nmarkers < s->slice_count` (max 16) — changed to `nmarkers < MAX_SLICES` so detection can find up to 128 transients.
+- **Wrong pad-to-slice offset**: Previous sessions had various broken offsets (note-68, note%count, etc). Settled on direct note=slice mapping — simple, correct, octave-agnostic.
 
 ## Navigation — Final Design
 - **Back (CC51)**: exits chain UI entirely — do NOT use for in-component navigation
@@ -132,15 +161,19 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Voice stealing: same-note steal + memset on free-voice steal
 - ✅ Browser navigation: Knob 4 tap (main) + Jog Click (advanced) both open browser
 - ✅ Attack/decay swap fixed: ENV_ATTACK uses env_decay coeff, ENV_DECAY uses env_attack coeff
-- ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy; needs natural fade to zero
+- ✅ Detection cap fixed: scans up to 128 transients (was capped at slice_count=16)
+- ✅ Note mapping: note 0 = slice 0, direct. Octave down on Move to align pads to note 0.
+- ⏳ **NOT YET DEPLOYED/TESTED** — dsp.c is correct in repo, needs compile + deploy + hardware test
+- ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ `setTimeout` in triggerScan: may not work in QuickJS — tick poll is fallback
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## Next Steps
+- [ ] **Deploy and test**: `git pull && MOVE_HOST=172.16.254.1 ./scripts/deploy-slicer.sh` — octave Move down to note 0, load a drum loop, scan, test pads
+- [ ] Verify slice count goes above 16 with a busy loop at lower threshold
 - [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); fix 0ms decay playing full slice; smooth low-ms decay tail
 - [ ] Verify `setTimeout` works in QuickJS; if not, replace with tick-counter poll in triggerScan
-- [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping
 
 ---
@@ -323,13 +356,13 @@ Located in `src/shared/`:
 
 ## Move Hardware MIDI
 
-Pads: Notes 68-99
+Pads: Notes 68-99 (4 rows × 8 cols, bottom-left=68, top-right=99)
 Steps: Notes 16-31
 Tracks: CCs 40-43 (reversed: CC43=Track1, CC40=Track4)
 
 Key CCs: 3 (jog click), 14 (jog turn), 49 (shift), 50 (menu), 51 (back), 71-78 (knobs)
 
-Notes 0-9: Capacitive touch from knobs (filter if not needed)
+Notes 0-7: Capacitive touch from knobs 1-8 (filter if not needed)
 
 ## Audio Mailbox Layout
 
