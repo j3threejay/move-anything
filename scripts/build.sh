@@ -319,6 +319,14 @@ mkdir -p ./build/modules/sound_generators/linein/
     -Isrc \
     -lm
 
+# Build Slicer sound generator
+mkdir -p ./build/modules/sound_generators/slicer/
+"${CROSS_PREFIX}gcc" -g -O3 -shared -fPIC \
+    src/modules/sound_generators/slicer/dsp.c \
+    -o build/modules/sound_generators/slicer/dsp.so \
+    -Isrc \
+    -lm
+
 # Copy shared utilities (exclude parse_move_manual.mjs — not for distribution)
 for f in ./src/shared/*.mjs; do
     case "$f" in *parse_move_manual*) continue ;; esac

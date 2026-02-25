@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(brew install aarch64-unknown-linux-gnu)",
+      "Bash(brew search aarch64 2>/dev/null)",
+      "Bash(brew install --cask docker)",
+      "Bash(docker info --format '{{.ServerVersion}}' 2>&1)",
+      "Bash(./scripts/build.sh 2>&1)",
+      "Bash(./scripts/install.sh local 2>&1)"
+    ]
+  }
+}

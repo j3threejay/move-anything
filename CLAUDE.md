@@ -1,3 +1,95 @@
+# move-anything — Project Context
+
+## End of Session Command
+
+update CLAUDE.md with everything we built or changed today, current status of all open issues, and updated next steps — then run: git add -A && git commit -m "WIP: end of session snapshot" && git push origin main
+
+## What This Is
+Fork of charlesvestal/move-anything. Primary work: a custom **Slicer** sound generator module that runs on Ableton Move hardware (ARM64 Linux) using Plugin API v2 + QuickJS UI.
+
+## Upstream / Fork
+- Original: https://github.com/charlesvestal/move-anything
+- My fork: https://github.com/j3threejay/move-anything (SSH remote: `git@github.com:j3threejay/move-anything.git`)
+
+## What We've Built
+
+### Slicer Module — `src/modules/sound_generators/slicer/`
+A transient-detection sampler with up to 128 auto-slices, polyphonic playback, A/D envelope, and WAV file browser.
+
+**Files:**
+- `dsp.c` — Plugin API v2 C DSP: WAV loader (16-bit and 24-bit PCM, proper chunk scanning), energy-based RMS transient detection, 8-voice polyphony, linear interpolation playback
+- `ui_chain.js` — Signal Chain UI shim (QuickJS ES module): file browser, param display, MIDI input
+- `module.json` — `"name": "Slicer"`, `"api_version": 2`, `"component_type": "sound_generator"`, `"chainable": true`
+
+**DSP params exposed:**
+`sensitivity`, `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (0–500ms), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only)
+
+**UI controls (no shift required — shim consumes CC49 before JS sees it):**
+- Jog Click (main) → open file browser
+- Jog Click (browser) → enter folder / select WAV
+- Back (main) → advanced view
+- Back (browser or advanced) → main
+- Jog rotate → scroll browser / adjust sensitivity (main) / cycle mode (advanced)
+- Knobs 1–4 (main): sensitivity / slices / pitch / gain
+- Knobs 1–4 (advanced): attack / decay / start_trim / end_trim
+
+**File browser implementation:**
+Uses QuickJS built-in `import * as os from 'os'` — `os.readdir([names, err])` for directory listing, `os.stat([stat, err])` with `(stat.mode & 0o170000) === 0o040000` for dir detection. **No built-in host file picker API exists.** Root is `/data/UserData/UserLibrary/Samples`. Confirmed working on device.
+
+### Deploy Script — `scripts/deploy-slicer.sh`
+Fast single-module deploy (no full install.sh needed). Cross-compiles `dsp.c` via Docker, SCPs `dsp.so + module.json + ui_chain.js` to device, restarts Move service.
+
+```bash
+./scripts/deploy-slicer.sh                         # uses move.local
+MOVE_HOST=192.168.x.x ./scripts/deploy-slicer.sh  # override host
+```
+
+SSH users: `ableton@move.local` (file ops, data partition), `root@move.local` (service restart)
+
+### build.sh additions
+`scripts/build.sh` has a Slicer build step that cross-compiles `src/modules/sound_generators/slicer/dsp.c` → `build/modules/sound_generators/slicer/dsp.so`.
+
+## SSH / Deploy Requirements
+- Move on WiFi, SSH key added at http://move.local/development/ssh
+- Both devices on same network
+- Docker installed (for cross-compilation)
+- `install.sh local` requires interactive TTY — run directly in terminal, not via script
+
+## Accessing Slicer on Move
+Shadow UI → Sound Generators → Slicer → add to Signal Chain
+
+## Debug Logging
+Enable on device: `ssh ableton@move.local 'touch /data/UserData/move-anything/debug_log_on'`
+Watch log: `ssh ableton@move.local 'tail -f /data/UserData/move-anything/debug.log'`
+
+Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
+
+## MIDI Routing in ui_chain.js — Critical Notes
+- **CC 49 (Shift) is consumed by the shim** before reaching any JS. Do not rely on shift state in ui_chain.js — it will never be set.
+- **chain/ui.js** only intercepts `Shift+Menu` (CC50+shift) when `componentUiActive`. Everything else — including plain jog click, Back, knobs — passes directly to `componentUi.onMidiMessageInternal(data)`.
+- **CC 50 (Menu)** exits to session view at a level above chain/ui.js — never use as a module trigger.
+- **CC 51 (Back)** reaches ui_chain.js cleanly and is safe to use.
+
+## Known Bugs Fixed This Session
+- **WAV loader silent failure**: Professional WAV files (Ableton, Pro Tools, Logic exports) have a `JUNK` chunk between the `WAVE` marker and the `fmt ` chunk. The old 44-byte flat header reader treated JUNK data as format fields → `channels=0` → `frames=0` → `slice_count_actual=0` → silence. Fixed by scanning chunks properly.
+- **24-bit WAV support**: Added — reads raw bytes, shifts right 8 bits to 16-bit on load.
+- **Shift+Jog Click browser trigger**: Didn't work because shim consumes CC49. Changed browser trigger to plain Jog Click from main view.
+
+## Current Status (end of session)
+- ✅ File browser: working, navigates subdirs, selects WAV files
+- ✅ WAV loading: fixed for JUNK-chunk WAVs and 24-bit files, deployed
+- ⏳ Playback with real samples: WAV fix just deployed, not yet confirmed sounding
+- ⏳ Transient detection quality: untested with real material
+- ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
+
+## Next Steps
+- [ ] Confirm playback works with real samples after WAV loader fix
+- [ ] Test transient detection quality — tune sensitivity range if needed
+- [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI param editing
+- [ ] Consider adding sample name display in browser (currently truncated to 17 chars — may need scroll or shorter display)
+
+---
+
 # CLAUDE.md
 
 Instructions for Claude Code when working with this repository.

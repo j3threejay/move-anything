@@ -15,7 +15,6 @@
 #define BLOCK_SIZE      128
 #define MAX_SLICES      128
 #define MAX_VOICES      8
-#define WAV_HEADER_SIZE 44
 
 /* ── Envelope states ─────────────────────────────────────────────────────── */
 typedef enum { ENV_IDLE, ENV_ATTACK, ENV_SUSTAIN, ENV_DECAY } env_state_t;
@@ -74,35 +73,93 @@ static float ms_to_coeff(float ms, float target) {
     return powf(target, 1.0f / (float)samples);
 }
 
-/* ── WAV loader (PCM 16-bit stereo only) ─────────────────────────────────── */
+/* ── WAV loader (16-bit and 24-bit PCM, any chunk layout) ────────────────── */
 static int load_wav(slicer_t *s, const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
 
-    uint8_t hdr[WAV_HEADER_SIZE];
-    if (fread(hdr, 1, WAV_HEADER_SIZE, f) < WAV_HEADER_SIZE) { fclose(f); return 0; }
+    char tag[4];
+    uint32_t u32;
 
-    /* basic RIFF check */
-    if (hdr[0]!='R'||hdr[1]!='I'||hdr[2]!='F'||hdr[3]!='F') { fclose(f); return 0; }
+    /* RIFF / WAVE header */
+    if (fread(tag, 1, 4, f) < 4 || memcmp(tag, "RIFF", 4) != 0) { fclose(f); return 0; }
+    fread(&u32, 4, 1, f); /* RIFF size, ignored */
+    if (fread(tag, 1, 4, f) < 4 || memcmp(tag, "WAVE", 4) != 0) { fclose(f); return 0; }
 
-    uint16_t channels   = hdr[22] | (hdr[23]<<8);
-    uint32_t data_size  = hdr[40] | (hdr[41]<<8) | (hdr[42]<<16) | (hdr[43]<<24);
-    int32_t  frames     = data_size / (channels * 2);
+    uint16_t channels = 0, bits_per_sample = 0, audio_format = 0;
+    uint32_t data_size = 0;
+    long     data_offset = 0;
+    int      found_fmt = 0, found_data = 0;
 
-    int16_t *buf = malloc(frames * 2 * sizeof(int16_t)); /* always store stereo */
+    /* scan chunks to find "fmt " and "data" */
+    char     chunk_id[4];
+    uint32_t chunk_size;
+    while (fread(chunk_id, 1, 4, f) == 4 && fread(&chunk_size, 4, 1, f) == 1) {
+        if (memcmp(chunk_id, "fmt ", 4) == 0) {
+            uint8_t fmt[16];
+            uint32_t rd = chunk_size < 16 ? chunk_size : 16;
+            if (fread(fmt, 1, rd, f) < rd) { fclose(f); return 0; }
+            if (chunk_size > rd) fseek(f, (long)(chunk_size - rd), SEEK_CUR);
+            audio_format    = fmt[0]  | (fmt[1] <<8);
+            channels        = fmt[2]  | (fmt[3] <<8);
+            bits_per_sample = fmt[14] | (fmt[15]<<8);
+            found_fmt = 1;
+        } else if (memcmp(chunk_id, "data", 4) == 0) {
+            data_size   = chunk_size;
+            data_offset = ftell(f);
+            found_data  = 1;
+            break;
+        } else {
+            /* skip unknown chunk, pad to even byte boundary */
+            fseek(f, (long)(chunk_size + (chunk_size & 1)), SEEK_CUR);
+        }
+    }
+
+    if (!found_fmt || !found_data || channels == 0 || data_size == 0) { fclose(f); return 0; }
+    /* PCM (1) or extensible (0xFFFE); not float */
+    if (audio_format != 1 && audio_format != 0xFFFE) { fclose(f); return 0; }
+    /* 16-bit or 24-bit only */
+    if (bits_per_sample != 16 && bits_per_sample != 24) { fclose(f); return 0; }
+
+    uint32_t bytes_per_smp = bits_per_sample / 8;
+    int32_t  frames = (int32_t)(data_size / (channels * bytes_per_smp));
+    if (frames <= 0) { fclose(f); return 0; }
+
+    int16_t *buf = malloc((size_t)frames * 2 * sizeof(int16_t));
     if (!buf) { fclose(f); return 0; }
 
-    if (channels == 2) {
-        fread(buf, sizeof(int16_t), frames * 2, f);
-    } else {
-        /* mono → stereo */
-        int16_t *mono = malloc(frames * sizeof(int16_t));
-        fread(mono, sizeof(int16_t), frames, f);
-        for (int i = 0; i < frames; i++) {
-            buf[i*2]   = mono[i];
-            buf[i*2+1] = mono[i];
+    fseek(f, data_offset, SEEK_SET);
+
+    if (bits_per_sample == 16) {
+        if (channels == 2) {
+            fread(buf, sizeof(int16_t), (size_t)frames * 2, f);
+        } else {
+            /* mono → stereo */
+            int16_t *mono = malloc((size_t)frames * sizeof(int16_t));
+            if (!mono) { free(buf); fclose(f); return 0; }
+            fread(mono, sizeof(int16_t), (size_t)frames, f);
+            for (int32_t i = 0; i < frames; i++) {
+                buf[i*2] = buf[i*2+1] = mono[i];
+            }
+            free(mono);
         }
-        free(mono);
+    } else {
+        /* 24-bit: read raw, convert to 16-bit */
+        uint32_t raw_size = (uint32_t)frames * channels * 3;
+        uint8_t *raw = malloc(raw_size);
+        if (!raw) { free(buf); fclose(f); return 0; }
+        fread(raw, 1, raw_size, f);
+        for (int32_t i = 0; i < frames; i++) {
+            for (int c = 0; c < 2; c++) {
+                int src_c = (c < (int)channels) ? c : 0;
+                int off   = (int)(i * channels * 3 + src_c * 3);
+                int32_t v = ((int32_t)raw[off+2] << 24)
+                          | ((int32_t)raw[off+1] << 16)
+                          | ((int32_t)raw[off+0] << 8);
+                buf[i*2+c] = (int16_t)(v >> 16);
+            }
+        }
+        free(raw);
     }
 
     fclose(f);
