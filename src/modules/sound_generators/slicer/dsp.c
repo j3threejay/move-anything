@@ -5,6 +5,8 @@
  *
  * Per-pad params: start_offset_ms, end_offset_ms, attack_ms, decay_ms, gain, loop_mode
  * Global params:  pitch, mode_gate, threshold, slice_count
+ *
+ * Pad mapping: MIDI note 68 = pad 1 = slice 0. slice_idx = (note - 68) % slice_count_actual
  */
 
 #include "host/plugin_api_v1.h"
@@ -19,6 +21,7 @@
 #define MAX_SLICES       128
 #define MAX_VOICES       8
 #define RELEASE_SAMPLES  64   /* ~1.5ms fade-out when slice end is reached */
+#define PAD_BASE_NOTE    68   /* note 68 = pad 1 = slice 0 */
 
 /* loop modes */
 #define LOOP_OFF      0
@@ -284,7 +287,9 @@ static voice_t* find_voice_for_note(slicer_t *s, int note) {
 static void voice_start(slicer_t *s, int note, int velocity) {
     if (s->slice_count_actual == 0 || !s->sample_data) return;
 
-    int slice_idx = note % s->slice_count_actual;
+    /* note 68 = pad 1 = slice 0 */
+    int slice_idx = (note - PAD_BASE_NOTE) % s->slice_count_actual;
+    if (slice_idx < 0) slice_idx = 0;
     pad_params_t *p = &s->pads[slice_idx];
 
     /* apply per-pad offsets to detected boundaries, clamp to file */
@@ -431,10 +436,8 @@ static void v2_on_midi(void *inst, const uint8_t *msg, int len, int source) {
     if (status == 0x90 && velocity > 0) {
         voice_start(s, note, velocity);
     } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
-        /* always release on note-off — loop voices need this to stop */
         voice_t *v = find_voice_for_note(s, note);
         if (v) voice_release(v);
-        /* non-gate trigger voices ignore release (play to end naturally) */
     }
 }
 
@@ -460,7 +463,6 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
                     env = env + (1.0f - env) * (1.0f - v->env_decay);
                     if (env >= 0.999f) {
                         env = 1.0f;
-                        /* looping voices sustain; trigger non-loop decays; gate sustains */
                         if (v->loop_mode != LOOP_OFF || s->mode_gate)
                             v->env_state = ENV_SUSTAIN;
                         else
@@ -491,7 +493,6 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
             /* loop / ping-pong boundary handling */
             if (v->loop_mode == LOOP_FORWARD && !v->released) {
                 if (pos_int >= v->slice_end) {
-                    /* wrap back to start */
                     v->pos = (int64_t)v->slice_start << 16;
                     pos_int = v->slice_start;
                 }
@@ -510,7 +511,6 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
                     pos_int = v->slice_start;
                 }
             } else {
-                /* non-looping or released: normal end-of-slice fade */
                 if (pos_int >= v->slice_end) {
                     if (v->release == 0) v->release = RELEASE_SAMPLES;
                     pos_int = v->slice_end - 1;
