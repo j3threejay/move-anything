@@ -1,15 +1,6 @@
 /*
- * Slicer — ui_chain.js v3
- *
- * Confirmed hardware MIDI mappings:
- *   Jog rotate = CC14
- *   Jog click  = CC9 (works inside browser; may be eaten upstream from main view)
- *   Knobs 1-8  = CC71-78
- *   Pads       = Notes 68-99
- *   Knob touch = Notes 0-7 — eaten by chain/ui.js, never reaches us
- *
- * On init: browser opens automatically if no sample loaded.
- * Bank switching: rotating knobs 1-4 = bank A, knobs 5-8 = bank B.
+ * Slicer — ui_chain.js v3 (click debug round 2)
+ * Shows CC9 raw val on browser screen to confirm it's reaching the handler
  */
 
 import * as os from 'os';
@@ -24,7 +15,9 @@ const SAMPLES_DIR      = '/data/UserData/UserLibrary/Samples';
 const SCREEN_W         = 128;
 const SCAN_FLASH_TICKS = 120;
 const LOOP_LABELS      = ['Off', 'Loop', 'Ping'];
-const JOG_CLICK        = 9;   /* confirmed CC9 on hardware */
+const JOG_CLICK        = 9;
+
+let dbgCC9 = 'none';  /* last raw val on CC9 */
 
 const s = {
     view:     'browser',
@@ -175,7 +168,7 @@ function drawBankB() {
 }
 function drawBrowser() {
     clear_screen();
-    print(0, 0, 'Browse Samples', 1);
+    print(0, 0, 'Browse  cc9:' + dbgCC9, 1);
     fill_rect(0, 10, SCREEN_W, 1, 1);
     s.browserEntries.slice(s.browserScroll, s.browserScroll+4).forEach((e,i) => {
         const idx = s.browserScroll+i;
@@ -218,7 +211,7 @@ function onMidiMessageInternal(data) {
     const byte1  = data[1];
     const byte2  = data[2];
 
-    /* Pad hit: select slice, exit browser if open */
+    /* Pad hit */
     if (status === 0x90 && byte2 > 0 && byte1 >= 68 && byte1 <= 99) {
         if (s.slicerState === 1) {
             const slice = byte1 % s.sliceCountActual;
@@ -232,6 +225,12 @@ function onMidiMessageInternal(data) {
     if (status !== 0xB0) return;
     const cc = byte1, val = byte2;
 
+    /* Track CC9 always — update debug and dirty regardless */
+    if (cc === JOG_CLICK) {
+        dbgCC9 = String(val);
+        s.dirty = true;
+    }
+
     /* Jog rotate (CC14) */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(val);
@@ -242,12 +241,11 @@ function onMidiMessageInternal(data) {
         return;
     }
 
-    /* Jog click (CC9) — works in browser, may be eaten from main view */
+    /* Jog click (CC9) */
     if (cc === JOG_CLICK && val > 0) {
         if (s.view === 'browser')     { browserSelect(); return; }
         if (s.view === 'sensitivity') { triggerScan(); s.view = 'main'; s.dirty = true; return; }
-        /* main view */
-        if (s.slicerState !== 1) { triggerScan(); return; }
+        if (s.slicerState !== 1)      { triggerScan(); return; }
         s.view = 'sensitivity'; s.dirty = true;
         return;
     }
