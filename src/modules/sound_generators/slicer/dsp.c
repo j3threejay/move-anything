@@ -6,7 +6,9 @@
  * Per-pad params: start_offset_ms, end_offset_ms, attack_ms, decay_ms, gain, loop_mode
  * Global params:  pitch, mode_gate, threshold, slice_count
  *
- * Pad mapping: MIDI note 68 = pad 1 = slice 0. slice_idx = (note - 68) % slice_count_actual
+ * Note mapping: note 0 = slice 0 (C -2), note 1 = slice 1 (C# -2), etc.
+ * Detection always finds up to MAX_SLICES (128) transients regardless of slice_count.
+ * slice_count is only used as fallback chunk size when no transients are found.
  */
 
 #include "host/plugin_api_v1.h"
@@ -21,7 +23,6 @@
 #define MAX_SLICES       128
 #define MAX_VOICES       8
 #define RELEASE_SAMPLES  64   /* ~1.5ms fade-out when slice end is reached */
-#define PAD_BASE_NOTE    68   /* note 68 = pad 1 = slice 0 */
 
 /* loop modes */
 #define LOOP_OFF      0
@@ -75,7 +76,7 @@ typedef struct {
 
     /* global params */
     float     threshold;
-    int       slice_count;   /* 8/16/32/64/128 */
+    int       slice_count;   /* fallback chunk count when no transients found */
     float     pitch;         /* semitones ±24 */
     int       mode_gate;     /* 0=trigger, 1=gate */
 
@@ -233,7 +234,8 @@ static void detect_slices(slicer_t *s) {
 
     float prev_rms = 0.001f;
 
-    for (int32_t i = total_start; i < total_end - win && nmarkers < s->slice_count; i += win/2) {
+    /* scan for transients up to MAX_SLICES (128) — not capped by slice_count */
+    for (int32_t i = total_start; i < total_end - win && nmarkers < MAX_SLICES; i += win/2) {
         float rms = 0.0f;
         for (int j = 0; j < win; j++) {
             int32_t idx = (i + j) * 2;
@@ -252,10 +254,12 @@ static void detect_slices(slicer_t *s) {
         prev_rms = rms * 0.3f + prev_rms * 0.7f;
     }
 
+    /* fallback: no transients found — divide evenly using slice_count as chunk size */
     if (nmarkers < 2) {
         nmarkers = 0;
-        int32_t step = region / s->slice_count;
-        for (int i = 0; i < s->slice_count; i++) {
+        int n = (s->slice_count > 0) ? s->slice_count : 16;
+        int32_t step = region / n;
+        for (int i = 0; i < n; i++) {
             markers[nmarkers++] = total_start + i * step;
         }
     }
@@ -287,9 +291,12 @@ static voice_t* find_voice_for_note(slicer_t *s, int note) {
 static void voice_start(slicer_t *s, int note, int velocity) {
     if (s->slice_count_actual == 0 || !s->sample_data) return;
 
-    /* note 68 = pad 1 = slice 0 */
-    int slice_idx = (note - PAD_BASE_NOTE) % s->slice_count_actual;
+    /* note 0 = slice 0 (C -2), note 1 = slice 1 (C# -2), etc.
+     * Clamp notes beyond slice_count_actual to the last slice. */
+    int slice_idx = note;
+    if (slice_idx >= s->slice_count_actual) slice_idx = s->slice_count_actual - 1;
     if (slice_idx < 0) slice_idx = 0;
+
     pad_params_t *p = &s->pads[slice_idx];
 
     /* apply per-pad offsets to detected boundaries, clamp to file */
