@@ -13,7 +13,7 @@
  *
  * Navigation:
  *   - Pad hit: select slice, sync per-pad values, play
- *   - Jog Click: open Browse/Sensitivity overlay
+ *   - Jog Click: open Browse/Sensitivity overlay (or browser if no sample)
  *   - Jog rotate in overlay: scroll between Browse and Sensitivity
  *   - Jog click in overlay: confirm selection
  *   - Jog rotate in browser: scroll files
@@ -86,19 +86,18 @@ function sp(key, val) {
 }
 
 function syncGlobal() {
-    s.samplePath      = gp('sample_path', '');
-    s.threshold       = parseFloat(gp('threshold', 0.5));
-    s.pitch           = parseFloat(gp('pitch', 0.0));
-    s.mode            = gp('mode', 'trigger');
+    s.samplePath       = gp('sample_path', '');
+    s.threshold        = parseFloat(gp('threshold', 0.5));
+    s.pitch            = parseFloat(gp('pitch', 0.0));
+    s.mode             = gp('mode', 'trigger');
     s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
-    s.slicerState     = parseInt(gp('slicer_state', 0));
-    s.sampleName      = s.samplePath
+    s.slicerState      = parseInt(gp('slicer_state', 0));
+    s.sampleName       = s.samplePath
         ? s.samplePath.split('/').pop().replace(/\.wav$/i, '')
         : '';
 }
 
 function syncPad() {
-    /* tell DSP which pad we're editing, then read its values */
     sp('selected_slice', s.selectedSlice);
     s.sliceStartTrim = parseFloat(gp('slice_start_trim', 0.0));
     s.sliceEndTrim   = parseFloat(gp('slice_end_trim',   0.0));
@@ -123,9 +122,9 @@ function isDir(path) {
 }
 
 function browserOpen(path) {
-    s.browserPath   = path;
-    s.browserCursor = 0;
-    s.browserScroll = 0;
+    s.browserPath    = path;
+    s.browserCursor  = 0;
+    s.browserScroll  = 0;
     s.browserEntries = [];
     try {
         const [names, err] = os.readdir(path);
@@ -164,12 +163,12 @@ function browserSelect() {
         browserOpen(e.path);
     } else {
         sp('sample_path', e.path);
-        s.samplePath  = e.path;
-        s.sampleName  = e.name.replace(/\.wav$/i, '');
-        s.slicerState = 0;
+        s.samplePath       = e.path;
+        s.sampleName       = e.name.replace(/\.wav$/i, '');
+        s.slicerState      = 0;
         s.sliceCountActual = 0;
-        s.view  = 'main';
-        s.dirty = true;
+        s.view             = 'main';
+        s.dirty            = true;
     }
 }
 
@@ -203,7 +202,6 @@ function adjustDecay(delta) {
     s.dirty = true;
 }
 function adjustMode(delta) {
-    /* toggle — any non-zero delta flips */
     s.mode = s.mode === 'trigger' ? 'gate' : 'trigger';
     sp('mode', s.mode);
     s.dirty = true;
@@ -232,7 +230,6 @@ function adjustThreshold(delta) {
 
 function triggerScan() {
     sp('scan', '1');
-    /* syncGlobal will pick up state change via tick poll */
 }
 
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
@@ -243,7 +240,6 @@ function drawSampleName() {
 }
 
 function drawBankA() {
-    /* Knobs 1-4: Start, End, Attack, Decay for selected pad */
     clear_screen();
     drawSampleName();
     const pad = s.slicerState === 1 ? 'Pad ' + (s.selectedSlice + 1) : '---';
@@ -254,7 +250,6 @@ function drawBankA() {
 }
 
 function drawBankB() {
-    /* Knobs 5-8: Mode, Pitch, Gain, Loop */
     clear_screen();
     drawSampleName();
     print(0, 13, 'Mode:' + s.mode.toUpperCase(), 1);
@@ -308,42 +303,35 @@ function drawBrowser() {
 }
 
 function drawOverlay() {
-    /* two-item menu: Browse / Sensitivity */
     clear_screen();
     drawSampleName();
     print(0, 18, (s.overlayCursor === 0 ? '> ' : '  ') + 'Browse', 1);
     print(0, 32, (s.overlayCursor === 1 ? '> ' : '  ') + 'Sensitivity', 1);
-    print(0, 46, 'Jog:select  Clk:confirm', 1);
+    print(0, 46, 'Jog:select  Clk:open', 1);
 }
 
 function drawSensitivity() {
     clear_screen();
     drawSampleName();
     print(0, 18, 'Sensitivity', 1);
-    /* bar */
     const barW = Math.round(s.threshold * 100);
     fill_rect(0, 30, barW, 8, 1);
-    fill_rect(barW, 30, 100 - barW, 8, 0);
-    fill_rect(0, 30, 100, 8, 0); /* outline trick — just use text */
-    print(0, 42, Math.round(s.threshold * 100) + '%  Jog:scan', 1);
+    print(0, 42, Math.round(s.threshold * 100) + '%  Clk:scan', 1);
 }
 
 /* ── Tick ─────────────────────────────────────────────────────────────────── */
 function tick() {
-    /* poll DSP state */
     const newState = parseInt(gp('slicer_state', 0));
     if (newState !== s.slicerState) {
         s.slicerState      = newState;
         s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
         if (newState === 1) {
-            /* scan succeeded — flash count then snap to bank A */
             s.scanFlashTicks = SCAN_FLASH_TICKS;
             s.knobBank = 'A';
         }
         s.dirty = true;
     }
 
-    /* scan flash countdown */
     if (s.scanFlashTicks > 0) {
         s.scanFlashTicks--;
         if (s.scanFlashTicks === 0) s.dirty = true;
@@ -352,24 +340,15 @@ function tick() {
     if (!s.dirty) return;
     s.dirty = false;
 
-    /* no sample loaded */
-    if (!s.samplePath) { drawNoSample(); return; }
-
-    /* browser / overlay / sensitivity views */
+    if (!s.samplePath)            { drawNoSample();    return; }
     if (s.view === 'browser')     { drawBrowser();     return; }
     if (s.view === 'overlay')     { drawOverlay();     return; }
     if (s.view === 'sensitivity') { drawSensitivity(); return; }
-
-    /* main view — state-driven */
-    if (s.slicerState === 0) { drawIdle();    return; }
-    if (s.slicerState === 2) { drawNoSlices(); return; }
-
-    /* READY */
-    if (s.scanFlashTicks > 0) { drawScanFlash(); return; }
-
-    /* default: knob bank display */
-    if (s.knobBank === 'B') drawBankB();
-    else                    drawBankA();
+    if (s.slicerState === 0)      { drawIdle();        return; }
+    if (s.slicerState === 2)      { drawNoSlices();    return; }
+    if (s.scanFlashTicks > 0)     { drawScanFlash();   return; }
+    if (s.knobBank === 'B')       { drawBankB();       return; }
+    drawBankA();
 }
 
 /* ── MIDI input ───────────────────────────────────────────────────────────── */
@@ -394,7 +373,7 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        /* knob touch: switch bank */
+        /* knob touch: switch display bank */
         const kA = [MoveKnob1Touch, MoveKnob2Touch, MoveKnob3Touch, MoveKnob4Touch];
         const kB = [MoveKnob5Touch, MoveKnob6Touch, MoveKnob7Touch, MoveKnob8Touch];
         if (kA.includes(byte1)) { s.knobBank = 'A'; s.dirty = true; return; }
@@ -415,31 +394,34 @@ function onMidiMessageInternal(data) {
             return;
         }
         if (s.view === 'sensitivity') { adjustThreshold(delta); return; }
-        /* main: if IDLE or NO_SLICES, adjust threshold; if READY, do nothing */
+        /* main: no sample or IDLE/NO_SLICES → open browser or adjust threshold */
+        if (!s.samplePath) {
+            browserOpen(s.browserPath);
+            s.view  = 'browser';
+            s.dirty = true;
+            return;
+        }
         if (s.slicerState !== 1) { adjustThreshold(delta); return; }
         return;
     }
 
-    /* ── Jog click ── */
-    if (cc === MoveMainButton && val === 127) {
+    /* ── Jog click (val > 0 to handle any non-zero value the hardware sends) ── */
+    if (cc === MoveMainButton && val > 0) {
         if (s.view === 'browser') {
             browserSelect();
             return;
         }
         if (s.view === 'overlay') {
             if (s.overlayCursor === 0) {
-                /* Browse */
                 browserOpen(s.browserPath);
-                s.view  = 'browser';
+                s.view = 'browser';
             } else {
-                /* Sensitivity */
                 s.view = 'sensitivity';
             }
             s.dirty = true;
             return;
         }
         if (s.view === 'sensitivity') {
-            /* jog click in sensitivity = scan */
             triggerScan();
             s.view  = 'main';
             s.dirty = true;
@@ -453,17 +435,15 @@ function onMidiMessageInternal(data) {
             return;
         }
         if (s.slicerState === 1) {
-            /* READY: open overlay */
             s.view  = 'overlay';
             s.dirty = true;
         } else {
-            /* IDLE / NO_SLICES: scan */
             triggerScan();
         }
         return;
     }
 
-    /* ── Knobs 1-4 (bank A) ── */
+    /* ── Knobs 1-4 (bank A, per-pad) ── */
     if (cc === MoveKnob1 || cc === MoveKnob2 || cc === MoveKnob3 || cc === MoveKnob4) {
         if (s.slicerState !== 1) return;
         const delta = decodeDelta(val);
@@ -479,8 +459,8 @@ function onMidiMessageInternal(data) {
         const delta = decodeDelta(val);
         if (cc === MoveKnob5) adjustMode(delta);
         if (cc === MoveKnob6) adjustPitch(delta);
-        if (cc === MoveKnob7) { if (s.slicerState === 1) adjustGain(delta); }
-        if (cc === MoveKnob8) { if (s.slicerState === 1) adjustLoop(delta); }
+        if (cc === MoveKnob7 && s.slicerState === 1) adjustGain(delta);
+        if (cc === MoveKnob8 && s.slicerState === 1) adjustLoop(delta);
         return;
     }
 }
@@ -488,7 +468,7 @@ function onMidiMessageInternal(data) {
 /* ── Init ─────────────────────────────────────────────────────────────────── */
 function init() {
     syncAll();
-    if (!s.samplePath) browserOpen(SAMPLES_DIR);
+    browserOpen(SAMPLES_DIR);
 }
 
 /* ── Export ───────────────────────────────────────────────────────────────── */
