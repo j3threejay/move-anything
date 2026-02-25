@@ -1,45 +1,79 @@
 /*
- * Slicer — ui_chain.js v2
- * State-aware UI: IDLE / READY / NO_SLICES / BROWSER / ADVANCED
+ * Slicer — ui_chain.js v3
+ *
+ * Layout:
+ *   Knobs 1-4 (bank A): Start trim, End trim, Attack, Decay  — per pad
+ *   Knobs 5-8 (bank B): Mode, Pitch, Gain, Loop             — 5/6 global, 7/8 per pad
+ *
+ * Display:
+ *   - Sample name always at top
+ *   - Default: knobs 1-4 values for selected pad
+ *   - Knob touch 1-4: show bank A; touch 5-8: show bank B
+ *   - After scan: flash slice count 2s then snap to bank A view
+ *
+ * Navigation:
+ *   - Pad hit: select slice, sync per-pad values, play
+ *   - Jog Click: open Browse/Sensitivity overlay
+ *   - Jog rotate in overlay: scroll between Browse and Sensitivity
+ *   - Jog click in overlay: confirm selection
+ *   - Jog rotate in browser: scroll files
+ *   - Jog click in browser: select
+ *   - Jog rotate in sensitivity: adjust threshold
+ *   - Back (CC51): exits chain UI (host behavior, not used here)
  */
 
 import * as os from 'os';
 import {
     MoveMainKnob, MoveMainButton, MoveShift, MoveBack,
     MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
-    MoveKnob4Touch
+    MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8,
+    MoveKnob1Touch, MoveKnob2Touch, MoveKnob3Touch, MoveKnob4Touch,
+    MoveKnob5Touch, MoveKnob6Touch, MoveKnob7Touch, MoveKnob8Touch
 } from '/data/UserData/move-anything/shared/constants.mjs';
 import { decodeDelta } from '/data/UserData/move-anything/shared/input_filter.mjs';
 
 const SAMPLES_DIR = '/data/UserData/UserLibrary/Samples';
-const SCREEN_W = 128;
-const SCREEN_H = 64;
+const SCREEN_W    = 128;
+const SCAN_FLASH_TICKS = 120; /* ~2s at typical tick rate */
 
-/* ── State ──────────────────────────────────────────────────────────────── */
+const LOOP_LABELS = ['Off', 'Loop', 'Ping'];
+
+/* ── State ───────────────────────────────────────────────────────────────── */
 const s = {
-    view: 'main',        // main | browser | advanced
-    shiftHeld: false,
-    dirty: true,
+    /* views: 'main' | 'browser' | 'overlay' | 'sensitivity' */
+    view:    'main',
+    knobBank: 'A',       /* 'A' = knobs 1-4, 'B' = knobs 5-8 */
+    dirty:   true,
 
-    /* DSP mirror */
-    sampleName: '',
-    samplePath: '',
-    threshold: 0.5,
-    pitch: 0.0,
-    gain: 0.8,
-    mode: 'trigger',
-    attack: 5.0,
-    decay: 200.0,
-    startTrim: 0.0,
-    endTrim: 1.0,
-    sliceCountActual: 0,
-    slicerState: 0,      // 0=IDLE 1=READY 2=NO_SLICES
+    /* DSP mirror — global */
+    sampleName:        '',
+    samplePath:        '',
+    threshold:         0.5,
+    pitch:             0.0,
+    mode:              'trigger',
+    sliceCountActual:  0,
+    slicerState:       0,   /* 0=IDLE 1=READY 2=NO_SLICES */
+
+    /* DSP mirror — per selected pad */
+    selectedSlice:     0,
+    sliceStartTrim:    0.0,   /* ms */
+    sliceEndTrim:      0.0,   /* ms */
+    sliceAttack:       5.0,   /* ms */
+    sliceDecay:        500.0, /* ms */
+    sliceGain:         0.8,
+    sliceLoop:         0,     /* 0=off 1=loop 2=pingpong */
+
+    /* scan flash countdown */
+    scanFlashTicks:    0,
 
     /* browser */
-    browserPath: SAMPLES_DIR,
-    browserEntries: [],
-    browserCursor: 0,
-    browserScroll: 0,
+    browserPath:       SAMPLES_DIR,
+    browserEntries:    [],
+    browserCursor:     0,
+    browserScroll:     0,
+
+    /* overlay (jog-click menu) */
+    overlayCursor:     0,   /* 0=Browse 1=Sensitivity */
 };
 
 /* ── DSP helpers ─────────────────────────────────────────────────────────── */
@@ -51,25 +85,32 @@ function sp(key, val) {
     try { host_module_set_param(key, String(val)); } catch(e) {}
 }
 
-function syncFromDSP() {
-    s.samplePath       = gp('sample_path', '');
-    s.threshold        = parseFloat(gp('threshold', 0.5));
-    s.pitch            = parseFloat(gp('pitch', 0.0));
-    s.gain             = parseFloat(gp('gain', 0.8));
-    s.mode             = gp('mode', 'trigger');
-    s.attack           = parseFloat(gp('attack', 5.0));
-    s.decay            = parseFloat(gp('decay', 200.0));
-    s.startTrim        = parseFloat(gp('start_trim', 0.0));
-    s.endTrim          = parseFloat(gp('end_trim', 1.0));
+function syncGlobal() {
+    s.samplePath      = gp('sample_path', '');
+    s.threshold       = parseFloat(gp('threshold', 0.5));
+    s.pitch           = parseFloat(gp('pitch', 0.0));
+    s.mode            = gp('mode', 'trigger');
     s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
-    s.slicerState      = parseInt(gp('slicer_state', 0));
+    s.slicerState     = parseInt(gp('slicer_state', 0));
+    s.sampleName      = s.samplePath
+        ? s.samplePath.split('/').pop().replace(/\.wav$/i, '')
+        : '';
+}
 
-    if (s.samplePath) {
-        const parts = s.samplePath.split('/');
-        s.sampleName = parts[parts.length - 1].replace(/\.wav$/i, '');
-    } else {
-        s.sampleName = '';
-    }
+function syncPad() {
+    /* tell DSP which pad we're editing, then read its values */
+    sp('selected_slice', s.selectedSlice);
+    s.sliceStartTrim = parseFloat(gp('slice_start_trim', 0.0));
+    s.sliceEndTrim   = parseFloat(gp('slice_end_trim',   0.0));
+    s.sliceAttack    = parseFloat(gp('slice_attack',     5.0));
+    s.sliceDecay     = parseFloat(gp('slice_decay',      500.0));
+    s.sliceGain      = parseFloat(gp('slice_gain',       0.8));
+    s.sliceLoop      = parseInt(gp('slice_loop',         0));
+}
+
+function syncAll() {
+    syncGlobal();
+    syncPad();
     s.dirty = true;
 }
 
@@ -82,41 +123,34 @@ function isDir(path) {
 }
 
 function browserOpen(path) {
-    s.browserPath    = path;
-    s.browserCursor  = 0;
-    s.browserScroll  = 0;
+    s.browserPath   = path;
+    s.browserCursor = 0;
+    s.browserScroll = 0;
     s.browserEntries = [];
-
     try {
         const [names, err] = os.readdir(path);
         if (err || !names) return;
-
         const entries = [];
         if (path !== SAMPLES_DIR) {
             const parts = path.split('/');
             parts.pop();
             entries.push({ name: '..', path: parts.join('/') || '/', dir: true });
         }
-
         const dirs = [], files = [];
         for (const n of names) {
             if (n === '.' || n === '..') continue;
             const full = path + '/' + n;
-            if (isDir(full)) {
-                dirs.push({ name: n, path: full, dir: true });
-            } else if (/\.wav$/i.test(n)) {
-                files.push({ name: n, path: full, dir: false });
-            }
+            if (isDir(full)) dirs.push({ name: n, path: full, dir: true });
+            else if (/\.wav$/i.test(n)) files.push({ name: n, path: full, dir: false });
         }
-        dirs.sort((a,b)  => a.name.localeCompare(b.name));
-        files.sort((a,b) => a.name.localeCompare(b.name));
+        dirs.sort((a, b)  => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
         s.browserEntries = entries.concat(dirs, files);
     } catch(e) {}
-
     s.dirty = true;
 }
 
-function browserScroll(delta) {
+function browserScrollBy(delta) {
     s.browserCursor = Math.max(0, Math.min(s.browserEntries.length - 1, s.browserCursor + delta));
     if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
     else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
@@ -130,119 +164,137 @@ function browserSelect() {
         browserOpen(e.path);
     } else {
         sp('sample_path', e.path);
-        s.samplePath = e.path;
-        s.sampleName = e.name.replace(/\.wav$/i, '');
+        s.samplePath  = e.path;
+        s.sampleName  = e.name.replace(/\.wav$/i, '');
         s.slicerState = 0;
         s.sliceCountActual = 0;
-        s.view = 'main';
+        s.view  = 'main';
         s.dirty = true;
     }
 }
 
-/* ── Param adjustment ────────────────────────────────────────────────────── */
-function adjust(key, delta) {
-    switch(key) {
-        case 'threshold':
-            s.threshold = Math.max(0, Math.min(1, s.threshold + delta * 0.05));
-            sp('threshold', s.threshold.toFixed(3));
-            s.slicerState = 0;
-            break;
-        case 'pitch':
-            s.pitch = Math.max(-24, Math.min(24, s.pitch + delta * 0.5));
-            sp('pitch', s.pitch.toFixed(1));
-            break;
-        case 'gain':
-            s.gain = Math.max(0, Math.min(1, s.gain + delta * 0.05));
-            sp('gain', s.gain.toFixed(3));
-            break;
-        case 'attack':
-            s.attack = Math.max(0, Math.min(500, s.attack + delta * 5));
-            sp('attack', s.attack.toFixed(1));
-            break;
-        case 'decay':
-            s.decay = Math.max(0, Math.min(2000, s.decay + delta * 20));
-            sp('decay', s.decay.toFixed(1));
-            break;
-        case 'startTrim':
-            s.startTrim = Math.max(0, Math.min(s.endTrim - 0.01, s.startTrim + delta * 0.01));
-            sp('start_trim', s.startTrim.toFixed(4));
-            s.slicerState = 0;
-            break;
-        case 'endTrim':
-            s.endTrim = Math.max(s.startTrim + 0.01, Math.min(1, s.endTrim + delta * 0.01));
-            sp('end_trim', s.endTrim.toFixed(4));
-            s.slicerState = 0;
-            break;
-        case 'mode':
-            s.mode = s.mode === 'trigger' ? 'gate' : 'trigger';
-            sp('mode', s.mode);
-            break;
-    }
+/* ── Param adjusters ─────────────────────────────────────────────────────── */
+function fmtMs(v) {
+    const sign = v >= 0 ? '+' : '';
+    return sign + Math.round(v) + 'ms';
+}
+function fmtPitch(v) {
+    return (v >= 0 ? '+' : '') + v.toFixed(1) + 'st';
+}
+
+function adjustStartTrim(delta) {
+    s.sliceStartTrim += delta * 5;
+    sp('slice_start_trim', s.sliceStartTrim.toFixed(1));
+    s.dirty = true;
+}
+function adjustEndTrim(delta) {
+    s.sliceEndTrim += delta * 5;
+    sp('slice_end_trim', s.sliceEndTrim.toFixed(1));
+    s.dirty = true;
+}
+function adjustAttack(delta) {
+    s.sliceAttack = Math.max(0, Math.min(500, s.sliceAttack + delta * 5));
+    sp('slice_attack', s.sliceAttack.toFixed(1));
+    s.dirty = true;
+}
+function adjustDecay(delta) {
+    s.sliceDecay = Math.max(0, Math.min(5000, s.sliceDecay + delta * 20));
+    sp('slice_decay', s.sliceDecay.toFixed(1));
+    s.dirty = true;
+}
+function adjustMode(delta) {
+    /* toggle — any non-zero delta flips */
+    s.mode = s.mode === 'trigger' ? 'gate' : 'trigger';
+    sp('mode', s.mode);
+    s.dirty = true;
+}
+function adjustPitch(delta) {
+    s.pitch = Math.max(-24, Math.min(24, s.pitch + delta * 0.5));
+    sp('pitch', s.pitch.toFixed(1));
+    s.dirty = true;
+}
+function adjustGain(delta) {
+    s.sliceGain = Math.max(0, Math.min(1, s.sliceGain + delta * 0.05));
+    sp('slice_gain', s.sliceGain.toFixed(3));
+    s.dirty = true;
+}
+function adjustLoop(delta) {
+    s.sliceLoop = Math.max(0, Math.min(2, s.sliceLoop + (delta > 0 ? 1 : -1)));
+    sp('slice_loop', String(s.sliceLoop));
+    s.dirty = true;
+}
+function adjustThreshold(delta) {
+    s.threshold = Math.max(0, Math.min(1, s.threshold + delta * 0.05));
+    sp('threshold', s.threshold.toFixed(3));
+    s.slicerState = 0;
     s.dirty = true;
 }
 
 function triggerScan() {
     sp('scan', '1');
-    /* poll DSP state after short delay */
-    setTimeout(() => { syncFromDSP(); s.dirty = true; }, 300);
+    /* syncGlobal will pick up state change via tick poll */
 }
 
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
-function drawMain() {
-    clear_screen();
-
-    /* sample name */
-    const name = s.sampleName ? s.sampleName.substring(0, 20) : '-- no sample --';
+function drawSampleName() {
+    const name = s.sampleName ? s.sampleName.substring(0, 21) : '-- no sample --';
     print(0, 0, name, 1);
-
-    /* horizontal divider */
     fill_rect(0, 10, SCREEN_W, 1, 1);
-
-    if (!s.samplePath) {
-        print(0, 15, 'Clk or Bk: browse', 1);
-        return;
-    }
-
-    /* threshold */
-    const tPct = Math.round(s.threshold * 100);
-    print(0, 14, 'Thresh: ' + tPct + '%', 1);
-
-    /* state-specific middle section */
-    if (s.slicerState === 1) {
-        /* READY */
-        print(0, 26, 'Detected: ' + s.sliceCountActual + ' slices', 1);
-        print(0, 36, 'Pch:' + (s.pitch >= 0 ? '+' : '') + s.pitch.toFixed(1) +
-              '  Gain:' + Math.round(s.gain * 100) + '%', 1);
-    } else if (s.slicerState === 2) {
-        /* NO SLICES */
-        print(0, 26, 'No slices found', 1);
-        print(0, 36, 'Lower threshold', 1);
-    } else {
-        /* IDLE */
-        print(0, 26, 'Clk: scan', 1);
-    }
-
-    /* footer */
-    fill_rect(0, 54, SCREEN_W, 1, 1);
-    print(0, 56, 'K4:browse  Clk:adv', 1);
 }
 
-function drawAdvanced() {
+function drawBankA() {
+    /* Knobs 1-4: Start, End, Attack, Decay for selected pad */
     clear_screen();
-    print(0, 0, '-- Advanced --', 1);
-    fill_rect(0, 10, SCREEN_W, 1, 1);
-    print(0, 14, 'Mode: ' + s.mode.toUpperCase(), 1);
-    print(0, 24, 'Atk:' + Math.round(s.attack) + 'ms  Dec:' + Math.round(s.decay) + 'ms', 1);
-    print(0, 34, 'Start:' + Math.round(s.startTrim * 100) + '%  End:' + Math.round(s.endTrim * 100) + '%', 1);
-    fill_rect(0, 54, SCREEN_W, 1, 1);
-    print(0, 56, 'Rot:mode  Clk:browse', 1);
+    drawSampleName();
+    const pad = s.slicerState === 1 ? 'Pad ' + (s.selectedSlice + 1) : '---';
+    print(0, 13, pad, 1);
+    print(0, 23, 'Str:' + fmtMs(s.sliceStartTrim) + '  End:' + fmtMs(s.sliceEndTrim), 1);
+    print(0, 33, 'Atk:' + Math.round(s.sliceAttack) + 'ms', 1);
+    print(0, 43, 'Dec:' + Math.round(s.sliceDecay) + 'ms', 1);
+}
+
+function drawBankB() {
+    /* Knobs 5-8: Mode, Pitch, Gain, Loop */
+    clear_screen();
+    drawSampleName();
+    print(0, 13, 'Mode:' + s.mode.toUpperCase(), 1);
+    print(0, 23, 'Pitch:' + fmtPitch(s.pitch), 1);
+    print(0, 33, 'Gain:' + Math.round(s.sliceGain * 100) + '%', 1);
+    print(0, 43, 'Loop:' + LOOP_LABELS[s.sliceLoop], 1);
+}
+
+function drawScanFlash() {
+    clear_screen();
+    drawSampleName();
+    print(0, 20, 'Detected:', 1);
+    print(0, 32, s.sliceCountActual + ' slices', 1);
+}
+
+function drawNoSample() {
+    clear_screen();
+    drawSampleName();
+    print(0, 20, 'Jog: browse', 1);
+}
+
+function drawIdle() {
+    clear_screen();
+    drawSampleName();
+    print(0, 20, 'Jog: scan', 1);
+    print(0, 32, 'Thresh:' + Math.round(s.threshold * 100) + '%', 1);
+}
+
+function drawNoSlices() {
+    clear_screen();
+    drawSampleName();
+    print(0, 20, 'No slices found', 1);
+    print(0, 32, 'Lower threshold', 1);
+    print(0, 44, 'Jog: adjust/scan', 1);
 }
 
 function drawBrowser() {
     clear_screen();
     print(0, 0, 'Browse Samples', 1);
     fill_rect(0, 10, SCREEN_W, 1, 1);
-
     const visible = s.browserEntries.slice(s.browserScroll, s.browserScroll + 4);
     visible.forEach((e, i) => {
         const idx    = s.browserScroll + i;
@@ -252,146 +304,192 @@ function drawBrowser() {
         const label  = (cursor + icon + e.name).substring(0, 21);
         print(0, y, label, idx === s.browserCursor ? 2 : 1);
     });
-
-    if (s.browserEntries.length === 0) {
-        print(0, 26, 'No WAV files here', 1);
-    }
-
-    fill_rect(0, 54, SCREEN_W, 1, 1);
-    print(0, 56, 'Jog:scroll  Clk:select', 1);
+    if (s.browserEntries.length === 0) print(0, 26, 'No WAV files here', 1);
 }
 
-/* ── Tick ────────────────────────────────────────────────────────────────── */
+function drawOverlay() {
+    /* two-item menu: Browse / Sensitivity */
+    clear_screen();
+    drawSampleName();
+    print(0, 18, (s.overlayCursor === 0 ? '> ' : '  ') + 'Browse', 1);
+    print(0, 32, (s.overlayCursor === 1 ? '> ' : '  ') + 'Sensitivity', 1);
+    print(0, 46, 'Jog:select  Clk:confirm', 1);
+}
+
+function drawSensitivity() {
+    clear_screen();
+    drawSampleName();
+    print(0, 18, 'Sensitivity', 1);
+    /* bar */
+    const barW = Math.round(s.threshold * 100);
+    fill_rect(0, 30, barW, 8, 1);
+    fill_rect(barW, 30, 100 - barW, 8, 0);
+    fill_rect(0, 30, 100, 8, 0); /* outline trick — just use text */
+    print(0, 42, Math.round(s.threshold * 100) + '%  Jog:scan', 1);
+}
+
+/* ── Tick ─────────────────────────────────────────────────────────────────── */
 function tick() {
-    /* poll DSP state every tick when scanning */
-    if (s.slicerState === 0 && s.samplePath) {
-        const newState = parseInt(gp('slicer_state', 0));
-        if (newState !== s.slicerState) {
-            s.slicerState      = newState;
-            s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
-            s.dirty = true;
+    /* poll DSP state */
+    const newState = parseInt(gp('slicer_state', 0));
+    if (newState !== s.slicerState) {
+        s.slicerState      = newState;
+        s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
+        if (newState === 1) {
+            /* scan succeeded — flash count then snap to bank A */
+            s.scanFlashTicks = SCAN_FLASH_TICKS;
+            s.knobBank = 'A';
         }
+        s.dirty = true;
+    }
+
+    /* scan flash countdown */
+    if (s.scanFlashTicks > 0) {
+        s.scanFlashTicks--;
+        if (s.scanFlashTicks === 0) s.dirty = true;
     }
 
     if (!s.dirty) return;
     s.dirty = false;
 
-    switch(s.view) {
-        case 'browser':  drawBrowser();  break;
-        case 'advanced': drawAdvanced(); break;
-        default:         drawMain();     break;
-    }
+    /* no sample loaded */
+    if (!s.samplePath) { drawNoSample(); return; }
+
+    /* browser / overlay / sensitivity views */
+    if (s.view === 'browser')     { drawBrowser();     return; }
+    if (s.view === 'overlay')     { drawOverlay();     return; }
+    if (s.view === 'sensitivity') { drawSensitivity(); return; }
+
+    /* main view — state-driven */
+    if (s.slicerState === 0) { drawIdle();    return; }
+    if (s.slicerState === 2) { drawNoSlices(); return; }
+
+    /* READY */
+    if (s.scanFlashTicks > 0) { drawScanFlash(); return; }
+
+    /* default: knob bank display */
+    if (s.knobBank === 'B') drawBankB();
+    else                    drawBankA();
 }
 
-/* ── MIDI input ──────────────────────────────────────────────────────────── */
+/* ── MIDI input ───────────────────────────────────────────────────────────── */
 function onMidiMessageInternal(data) {
     const status = data[0] & 0xF0;
+    const byte1  = data[1];
+    const byte2  = data[2];
 
-    /* Note On: knob touch events (notes 0–7) */
-    if (status === 0x90 && data[2] > 0) {
-        /* Knob 4 tap in main view → browser */
-        if (data[1] === MoveKnob4Touch && s.view === 'main') {
-            browserOpen(s.browserPath);
-            s.view = 'browser';
-            s.dirty = true;
+    /* ── Note On ── */
+    if (status === 0x90 && byte2 > 0) {
+        /* pad hit (notes 68-99): select slice */
+        if (byte1 >= 68 && byte1 <= 99) {
+            if (s.slicerState === 1) {
+                const slice = byte1 % s.sliceCountActual;
+                if (slice !== s.selectedSlice) {
+                    s.selectedSlice = slice;
+                    syncPad();
+                }
+                s.knobBank = 'A';
+                s.dirty    = true;
+            }
+            return;
         }
+
+        /* knob touch: switch bank */
+        const kA = [MoveKnob1Touch, MoveKnob2Touch, MoveKnob3Touch, MoveKnob4Touch];
+        const kB = [MoveKnob5Touch, MoveKnob6Touch, MoveKnob7Touch, MoveKnob8Touch];
+        if (kA.includes(byte1)) { s.knobBank = 'A'; s.dirty = true; return; }
+        if (kB.includes(byte1)) { s.knobBank = 'B'; s.dirty = true; return; }
         return;
     }
 
     if (status !== 0xB0) return;
-    const cc = data[1], val = data[2];
+    const cc = byte1, val = byte2;
 
-    /* shift tracking */
-    if (cc === MoveShift) { s.shiftHeld = val > 0; return; }
-
-    /* back: browser→main, everything else→browser */
-    if (cc === MoveBack && val === 127) {
-        if (s.view === 'browser') {
-            s.view = 'main';
-        } else {
-            browserOpen(s.browserPath);
-            s.view = 'browser';
-        }
-        s.dirty = true;
-        return;
-    }
-
-    /* jog rotate */
+    /* ── Jog rotate ── */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(val);
-        if (s.view === 'browser') {
-            browserScroll(delta);
-        } else if (s.view === 'advanced') {
-            adjust('mode', delta);
-        } else {
-            adjust('threshold', delta);
+        if (s.view === 'browser')     { browserScrollBy(delta); return; }
+        if (s.view === 'overlay')     {
+            s.overlayCursor = Math.max(0, Math.min(1, s.overlayCursor + (delta > 0 ? 1 : -1)));
+            s.dirty = true;
+            return;
         }
+        if (s.view === 'sensitivity') { adjustThreshold(delta); return; }
+        /* main: if IDLE or NO_SLICES, adjust threshold; if READY, do nothing */
+        if (s.slicerState !== 1) { adjustThreshold(delta); return; }
         return;
     }
 
-    /* jog click */
+    /* ── Jog click ── */
     if (cc === MoveMainButton && val === 127) {
-        if (s.shiftHeld) {
-            /* Shift+Jog → toggle browser */
-            if (s.view === 'browser') {
-                s.view = 'main';
-            } else {
+        if (s.view === 'browser') {
+            browserSelect();
+            return;
+        }
+        if (s.view === 'overlay') {
+            if (s.overlayCursor === 0) {
+                /* Browse */
                 browserOpen(s.browserPath);
-                s.view = 'browser';
+                s.view  = 'browser';
+            } else {
+                /* Sensitivity */
+                s.view = 'sensitivity';
             }
             s.dirty = true;
             return;
         }
-
-        switch(s.view) {
-            case 'browser':
-                browserSelect();
-                break;
-            case 'advanced':
-                browserOpen(s.browserPath);
-                s.view = 'browser';
-                s.dirty = true;
-                break;
-            default:
-                /* main: no sample → browser, idle/no_slices → scan, ready → advanced */
-                if (!s.samplePath) {
-                    browserOpen(s.browserPath);
-                    s.view = 'browser';
-                    s.dirty = true;
-                } else if (s.slicerState !== 1) {
-                    triggerScan();
-                } else {
-                    s.view = 'advanced';
-                    s.dirty = true;
-                }
-                break;
+        if (s.view === 'sensitivity') {
+            /* jog click in sensitivity = scan */
+            triggerScan();
+            s.view  = 'main';
+            s.dirty = true;
+            return;
+        }
+        /* main view */
+        if (!s.samplePath) {
+            browserOpen(s.browserPath);
+            s.view  = 'browser';
+            s.dirty = true;
+            return;
+        }
+        if (s.slicerState === 1) {
+            /* READY: open overlay */
+            s.view  = 'overlay';
+            s.dirty = true;
+        } else {
+            /* IDLE / NO_SLICES: scan */
+            triggerScan();
         }
         return;
     }
 
-    /* knobs — main view */
-    if (s.view === 'main') {
+    /* ── Knobs 1-4 (bank A) ── */
+    if (cc === MoveKnob1 || cc === MoveKnob2 || cc === MoveKnob3 || cc === MoveKnob4) {
+        if (s.slicerState !== 1) return;
         const delta = decodeDelta(val);
-        if      (cc === MoveKnob1) adjust('threshold', delta);
-        else if (cc === MoveKnob2) adjust('pitch',     delta);
-        else if (cc === MoveKnob3) adjust('gain',      delta);
+        if (cc === MoveKnob1) adjustStartTrim(delta);
+        if (cc === MoveKnob2) adjustEndTrim(delta);
+        if (cc === MoveKnob3) adjustAttack(delta);
+        if (cc === MoveKnob4) adjustDecay(delta);
+        return;
     }
 
-    /* knobs — advanced view */
-    if (s.view === 'advanced') {
+    /* ── Knobs 5-8 (bank B) ── */
+    if (cc === MoveKnob5 || cc === MoveKnob6 || cc === MoveKnob7 || cc === MoveKnob8) {
         const delta = decodeDelta(val);
-        if      (cc === MoveKnob1) adjust('attack',    delta);
-        else if (cc === MoveKnob2) adjust('decay',     delta);
-        else if (cc === MoveKnob3) adjust('startTrim', delta);
-        else if (cc === MoveKnob4) adjust('endTrim',   delta);
+        if (cc === MoveKnob5) adjustMode(delta);
+        if (cc === MoveKnob6) adjustPitch(delta);
+        if (cc === MoveKnob7) { if (s.slicerState === 1) adjustGain(delta); }
+        if (cc === MoveKnob8) { if (s.slicerState === 1) adjustLoop(delta); }
+        return;
     }
 }
 
-/* ── Init ────────────────────────────────────────────────────────────────── */
+/* ── Init ─────────────────────────────────────────────────────────────────── */
 function init() {
-    syncFromDSP();
-    browserOpen(SAMPLES_DIR);
+    syncAll();
+    if (!s.samplePath) browserOpen(SAMPLES_DIR);
 }
 
-/* ── Export ──────────────────────────────────────────────────────────────── */
+/* ── Export ───────────────────────────────────────────────────────────────── */
 globalThis.chain_ui = { init, tick, onMidiMessageInternal };
