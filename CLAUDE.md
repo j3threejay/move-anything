@@ -47,8 +47,8 @@ A transient-detection sampler with up to 128 auto-slices, polyphonic playback, A
 Cross-compiles `dsp.c` via Docker, SCPs `dsp.so + module.json + ui_chain.js`, restarts service.
 
 ```bash
-./scripts/deploy-slicer.sh                         # uses move.local
-MOVE_HOST=192.168.68.62 ./scripts/deploy-slicer.sh # override with IP (more reliable)
+./scripts/deploy-slicer.sh                          # uses move.local
+MOVE_HOST=172.16.254.1 ./scripts/deploy-slicer.sh  # override with USB IP (most reliable)
 ```
 
 If deploy-slicer.sh SSH step times out (known intermittent issue), deploy manually:
@@ -56,11 +56,11 @@ If deploy-slicer.sh SSH step times out (known intermittent issue), deploy manual
 DEST="/data/UserData/move-anything/modules/sound_generators/slicer"
 SRC="src/modules/sound_generators/slicer"
 OUT="build/modules/sound_generators/slicer"
-scp -o ConnectTimeout=10 "$OUT/dsp.so" "$SRC/module.json" "$SRC/ui_chain.js" "ableton@move.local:$DEST/" && \
-ssh -o ConnectTimeout=10 -n root@move.local "/etc/init.d/move stop; sleep 1; /etc/init.d/move start"
+scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$OUT/dsp.so" "$SRC/module.json" "$SRC/ui_chain.js" "ableton@172.16.254.1:$DEST/" && \
+ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -n root@172.16.254.1 "/etc/init.d/move stop; sleep 1; /etc/init.d/move start"
 ```
 
-SSH users: `ableton@move.local` (file ops), `root@move.local` (service restart)
+SSH users: `ableton@<ip>` (file ops), `root@<ip>` (service restart)
 
 ### build.sh additions
 `scripts/build.sh` cross-compiles `src/modules/sound_generators/slicer/dsp.c` → `build/modules/sound_generators/slicer/dsp.so`.
@@ -94,19 +94,30 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **Shift+Jog browser trigger**: Shim consumes CC49. Redesigned navigation to use plain Jog Click and Back (no shift needed).
 - **Auto-detect on load removed**: DSP now stays IDLE until `scan=1` is set explicitly. Prevents detecting slices on wrong params before user is ready.
 - **`sensitivity` renamed `threshold`**: Matches UI intent — controls transient detection sensitivity.
+- **render_block out-of-bounds read (noise/distortion)**: Old `>= slice_end - 1` check ran after envelope update — voice could advance past the slice boundary and read `sample_data[slice_end * 2]` (adjacent memory = garbage). Fixed: bounds check now runs **before** any sample access using strict `>= slice_end`. Interpolation lookahead `pos_next` clamps to `pos_int` (not `slice_end - 1`) so the last sample is repeated rather than read past.
+- **voice_start missing end clamp**: Added `if (end > s->sample_frames) end = s->sample_frames` to guard against slice_points sentinel overrunning the buffer.
+- **voice_start missing start clamp**: Added `if (start < 0) start = 0` to guard against any negative slice_points value.
+- **slice_points[0] confirmed = total_start**: Both transient detection and equal-division fallback set `markers[0] = total_start`, not literal 0. `note % slice_count_actual` correctly maps note 0 → slice 0.
+
+## Move IP Notes
+- Move's IP can change between sessions. Use `ping move.local` to discover current IP.
+- mDNS `move.local` resolves but SCP/SSH may need `-o StrictHostKeyChecking=no` if IP changed.
+- Last known IP: `172.16.254.1` (USB network interface, stable) — prefer this over WiFi IP.
 
 ## Current Status (end of session)
 - ✅ File browser: working — navigates subdirs, selects WAV, confirmed on device
 - ✅ WAV loading: JUNK-chunk + 24-bit PCM support deployed
 - ✅ State machine UI: IDLE/READY/NO_SLICES flow deployed
 - ✅ Explicit scan trigger: Jog Click → `scan=1` → DSP detects → state updates
-- ⏳ End-to-end playback: WAV fix + state machine deployed together but not yet confirmed sounding by user
+- ✅ render_block bounds safety: out-of-bounds read fixed, noise/distortion from slice boundary eliminated
+- ✅ voice_start slice clamps: start < 0 and end > sample_frames both guarded
+- ⏳ End-to-end playback: all DSP fixes deployed, awaiting user confirmation of clean playback
 - ⏳ `setTimeout` in triggerScan: may not work in QuickJS — tick poll is fallback
 - ⏳ Transient detection quality: untested with real material
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## Next Steps
-- [ ] Confirm end-to-end: load sample → scan → pads trigger sound
+- [ ] Confirm end-to-end: load sample → scan → pads trigger sound cleanly (no noise at slice end)
 - [ ] Verify `setTimeout` works in QuickJS; if not, replace with tick-counter poll in triggerScan
 - [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping

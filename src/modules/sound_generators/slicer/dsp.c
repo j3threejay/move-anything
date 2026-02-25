@@ -259,6 +259,8 @@ static void voice_start(slicer_t *s, int note, int velocity) {
     int slice_idx = note % s->slice_count_actual;
     int32_t start = s->slice_points[slice_idx];
     int32_t end   = s->slice_points[slice_idx + 1];
+    if (start < 0) start = 0;
+    if (end > s->sample_frames) end = s->sample_frames;
     if (end <= start) return;
 
     voice_t *v = find_free_voice(s);
@@ -419,19 +421,17 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
             v->env_val = env;
             if (!v->active) break;
 
-            /* read position */
+            /* read position — check BEFORE any sample access */
             int32_t pos_int = v->pos >> 16;
             if (pos_int >= v->slice_end) {
-                /* reached end of slice */
-                v->env_state = ENV_IDLE;
-                v->active    = 0;
+                v->active = 0;
                 break;
             }
 
-            /* linear interpolation */
-            float frac      = (v->pos & 0xFFFF) / 65536.0f;
+            /* linear interpolation — safe clamp for lookahead */
+            float frac       = (v->pos & 0xFFFF) / 65536.0f;
             int32_t pos_next = pos_int + 1;
-            if (pos_next >= v->slice_end) pos_next = v->slice_end - 1;
+            if (pos_next >= v->slice_end) pos_next = pos_int;
 
             float l = s->sample_data[pos_int*2]   * (1.0f - frac)
                     + s->sample_data[pos_next*2]   * frac;
