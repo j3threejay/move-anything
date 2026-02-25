@@ -6,7 +6,8 @@
 import * as os from 'os';
 import {
     MoveMainKnob, MoveMainButton, MoveShift, MoveBack,
-    MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4
+    MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
+    MoveKnob4Touch
 } from '/data/UserData/move-anything/shared/constants.mjs';
 import { decodeDelta } from '/data/UserData/move-anything/shared/input_filter.mjs';
 
@@ -223,7 +224,7 @@ function drawMain() {
 
     /* footer */
     fill_rect(0, 54, SCREEN_W, 1, 1);
-    print(0, 56, 'Bk:browse  Clk:adv', 1);
+    print(0, 56, 'K4:browse  Clk:adv', 1);
 }
 
 function drawAdvanced() {
@@ -234,7 +235,7 @@ function drawAdvanced() {
     print(0, 24, 'Atk:' + Math.round(s.attack) + 'ms  Dec:' + Math.round(s.decay) + 'ms', 1);
     print(0, 34, 'Start:' + Math.round(s.startTrim * 100) + '%  End:' + Math.round(s.endTrim * 100) + '%', 1);
     fill_rect(0, 54, SCREEN_W, 1, 1);
-    print(0, 56, 'Jog:mode  Back:main', 1);
+    print(0, 56, 'Rot:mode  Clk:browse', 1);
 }
 
 function drawBrowser() {
@@ -284,19 +285,32 @@ function tick() {
 
 /* ── MIDI input ──────────────────────────────────────────────────────────── */
 function onMidiMessageInternal(data) {
-    if ((data[0] & 0xF0) !== 0xB0) return;
+    const status = data[0] & 0xF0;
+
+    /* Note On: knob touch events (notes 0–7) */
+    if (status === 0x90 && data[2] > 0) {
+        /* Knob 4 tap in main view → browser */
+        if (data[1] === MoveKnob4Touch && s.view === 'main') {
+            browserOpen(s.browserPath);
+            s.view = 'browser';
+            s.dirty = true;
+        }
+        return;
+    }
+
+    if (status !== 0xB0) return;
     const cc = data[1], val = data[2];
 
     /* shift tracking */
     if (cc === MoveShift) { s.shiftHeld = val > 0; return; }
 
-    /* back: main→browser, browser/advanced→main */
+    /* back: browser→main, everything else→browser */
     if (cc === MoveBack && val === 127) {
-        if (s.view === 'main') {
+        if (s.view === 'browser') {
+            s.view = 'main';
+        } else {
             browserOpen(s.browserPath);
             s.view = 'browser';
-        } else {
-            s.view = 'main';
         }
         s.dirty = true;
         return;
@@ -334,7 +348,8 @@ function onMidiMessageInternal(data) {
                 browserSelect();
                 break;
             case 'advanced':
-                s.view = 'main';
+                browserOpen(s.browserPath);
+                s.view = 'browser';
                 s.dirty = true;
                 break;
             default:

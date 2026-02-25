@@ -92,12 +92,31 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **WAV JUNK chunk**: Pro WAVs have a `JUNK` chunk before `fmt `. Old 44-byte flat reader → `channels=0` → silence. Fixed with proper RIFF chunk scanner.
 - **24-bit WAV**: Added support — reads 3 bytes/sample, shifts to 16-bit.
 - **Shift+Jog browser trigger**: Shim consumes CC49. Redesigned navigation to use plain Jog Click and Back (no shift needed).
-- **Auto-detect on load removed**: DSP now stays IDLE until `scan=1` is set explicitly. Prevents detecting slices on wrong params before user is ready.
-- **`sensitivity` renamed `threshold`**: Matches UI intent — controls transient detection sensitivity.
-- **render_block out-of-bounds read (noise/distortion)**: Old `>= slice_end - 1` check ran after envelope update — voice could advance past the slice boundary and read `sample_data[slice_end * 2]` (adjacent memory = garbage). Fixed: bounds check now runs **before** any sample access using strict `>= slice_end`. Interpolation lookahead `pos_next` clamps to `pos_int` (not `slice_end - 1`) so the last sample is repeated rather than read past.
-- **voice_start missing end clamp**: Added `if (end > s->sample_frames) end = s->sample_frames` to guard against slice_points sentinel overrunning the buffer.
-- **voice_start missing start clamp**: Added `if (start < 0) start = 0` to guard against any negative slice_points value.
-- **slice_points[0] confirmed = total_start**: Both transient detection and equal-division fallback set `markers[0] = total_start`, not literal 0. `note % slice_count_actual` correctly maps note 0 → slice 0.
+- **Auto-detect on load removed**: DSP now stays IDLE until `scan=1` is set explicitly.
+- **`sensitivity` renamed `threshold`**: Matches UI intent.
+- **render_block out-of-bounds read**: Bounds check now runs before any sample access using strict `>= slice_end`. Interpolation lookahead `pos_next` clamps to `pos_int`.
+- **voice_start slice clamps**: `start < 0` and `end > sample_frames` both guarded.
+- **`int32_t pos` overflow**: Fixed — changed to `int64_t`. `int32_t` could only represent ~0.74s of audio; any slice past that overflowed to negative, reading backward into unrelated memory (major distortion source, especially on hi-hats/cymbals which sit later in loops).
+- **Per-voice int16 clipping in mixer**: Replaced read-back-and-clamp-per-voice with a float `mix_l[]/mix_r[]` accumulation buffer. Single `clamp16()` pass at end of block.
+- **Voice stealing without zeroing state**: `find_free_voice()` now `memset`s stolen voice before reuse.
+- **ENV_IDLE not zeroing env_val**: Added hard zero + break at top of inner loop.
+- **Same-note comb filtering on retrigger**: `voice_start` now steals the existing same-note voice (memset + reuse) before falling back to `find_free_voice`. Prevents overlapping decays of identical slices creating metallic resonance.
+- **End-of-slice hard cutoff causing tin-can ringing**: Replaced immediate `active=0` at slice end with a 64-sample (~1.5ms) linear release fade. Voice holds last frame at decaying amplitude until the countdown reaches zero.
+- **Back button exits chain UI**: `MoveBack` (CC51) is intercepted by the chain host and exits the component — cannot be used for in-component navigation.
+- **Attack/decay coefficients swapped in render_block**: `ENV_ATTACK` was using `v->env_attack` and `ENV_DECAY` was using `v->env_decay` — behavior was inverted on hardware. Fixed by swapping: `ENV_ATTACK` now uses `v->env_decay` and `ENV_DECAY` uses `v->env_attack` in the render loop.
+
+## Navigation — Final Design
+- **Back (CC51)**: exits chain UI entirely — do NOT use for in-component navigation
+- **Shift (CC49)**: consumed by shim — never reaches JS
+- **Knob 4 tap (Note 3, MoveKnob4Touch)**: opens browser from main view
+- **Jog Click in advanced**: opens browser
+- **Jog Click in browser**: select file / enter folder → returns to main on file select
+- **Jog Click in main (no sample)**: opens browser
+- **Jog Click in main (IDLE/NO_SLICES)**: triggers scan
+- **Jog Click in main (READY)**: opens advanced
+
+## Knob Touch Events
+Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1–4), velocity 127 = touched. These reach `onMidiMessageInternal` — `onMidiMessageInternal` must handle both `0x90` (Note On) and `0xB0` (CC) status bytes.
 
 ## Move IP Notes
 - Move's IP can change between sessions. Use `ping move.local` to discover current IP.
@@ -105,19 +124,21 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - Last known IP: `172.16.254.1` (USB network interface, stable) — prefer this over WiFi IP.
 
 ## Current Status (end of session)
-- ✅ File browser: working — navigates subdirs, selects WAV, confirmed on device
-- ✅ WAV loading: JUNK-chunk + 24-bit PCM support deployed
-- ✅ State machine UI: IDLE/READY/NO_SLICES flow deployed
+- ✅ File browser: working — navigates subdirs, selects WAV
+- ✅ WAV loading: JUNK-chunk + 24-bit PCM support
+- ✅ State machine UI: IDLE/READY/NO_SLICES flow
 - ✅ Explicit scan trigger: Jog Click → `scan=1` → DSP detects → state updates
-- ✅ render_block bounds safety: out-of-bounds read fixed, noise/distortion from slice boundary eliminated
-- ✅ voice_start slice clamps: start < 0 and end > sample_frames both guarded
-- ⏳ End-to-end playback: all DSP fixes deployed, awaiting user confirmation of clean playback
+- ✅ render_block fully safe: int64 pos, float mix buffer, bounds check before read, release fade
+- ✅ Voice stealing: same-note steal + memset on free-voice steal
+- ✅ Browser navigation: Knob 4 tap (main) + Jog Click (advanced) both open browser
+- ✅ Attack/decay swap fixed: ENV_ATTACK uses env_decay coeff, ENV_DECAY uses env_attack coeff
+- ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy; needs natural fade to zero
 - ⏳ `setTimeout` in triggerScan: may not work in QuickJS — tick poll is fallback
-- ⏳ Transient detection quality: untested with real material
+- ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## Next Steps
-- [ ] Confirm end-to-end: load sample → scan → pads trigger sound cleanly (no noise at slice end)
+- [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); fix 0ms decay playing full slice; smooth low-ms decay tail
 - [ ] Verify `setTimeout` works in QuickJS; if not, replace with tick-counter poll in triggerScan
 - [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping

@@ -11,10 +11,11 @@
 #include <math.h>
 #include <stdint.h>
 
-#define SAMPLE_RATE     44100
-#define BLOCK_SIZE      128
-#define MAX_SLICES      128
-#define MAX_VOICES      8
+#define SAMPLE_RATE      44100
+#define BLOCK_SIZE       128
+#define MAX_SLICES       128
+#define MAX_VOICES       8
+#define RELEASE_SAMPLES  64   /* ~1.5ms fade-out when slice end is reached */
 
 /* ── Envelope states ─────────────────────────────────────────────────────── */
 typedef enum { ENV_IDLE, ENV_ATTACK, ENV_SUSTAIN, ENV_DECAY } env_state_t;
@@ -24,7 +25,7 @@ typedef struct {
     int       active;
     int       note;
     int       slice_idx;
-    int32_t   pos;           /* current read position in samples (fixed point: pos >> 16) */
+    int64_t   pos;           /* current read position in samples (fixed point: pos >> 16) */
     float     rate;          /* playback rate (pitch shift) */
     int32_t   slice_start;   /* sample index */
     int32_t   slice_end;     /* sample index */
@@ -33,6 +34,7 @@ typedef struct {
     float     env_attack;    /* coeff per sample */
     float     env_decay;     /* coeff per sample */
     float     velocity;
+    int       release;       /* countdown for end-of-slice fade-out */
 } voice_t;
 
 /* ── Main plugin state ───────────────────────────────────────────────────── */
@@ -67,6 +69,12 @@ typedef struct {
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 static float semitones_to_rate(float semitones) {
     return powf(2.0f, semitones / 12.0f);
+}
+
+static inline int16_t clamp16(float v) {
+    if (v >  32767.0f) return  32767;
+    if (v < -32768.0f) return -32768;
+    return (int16_t)v;
 }
 
 static float ms_to_coeff(float ms, float target) {
@@ -242,7 +250,8 @@ static voice_t* find_free_voice(slicer_t *s) {
     for (int i = 0; i < MAX_VOICES; i++) {
         if (!s->voices[i].active) return &s->voices[i];
     }
-    /* steal oldest (voice 0 — simple round-robin would be better but fine for v1) */
+    /* steal oldest (voice 0) — zero state before reuse to avoid mid-block corruption */
+    memset(&s->voices[0], 0, sizeof(voice_t));
     return &s->voices[0];
 }
 
@@ -263,11 +272,18 @@ static void voice_start(slicer_t *s, int note, int velocity) {
     if (end > s->sample_frames) end = s->sample_frames;
     if (end <= start) return;
 
-    voice_t *v = find_free_voice(s);
+    /* prefer stealing the same-note voice to prevent comb filtering on retrigger */
+    voice_t *v = find_voice_for_note(s, note);
+    if (v) {
+        memset(v, 0, sizeof(voice_t));
+    } else {
+        v = find_free_voice(s);
+    }
+
     v->active      = 1;
     v->note        = note;
     v->slice_idx   = slice_idx;
-    v->pos         = start << 16; /* fixed point */
+    v->pos         = (int64_t)start << 16; /* fixed point */
     v->rate        = semitones_to_rate(s->pitch);
     v->slice_start = start;
     v->slice_end   = end;
@@ -276,6 +292,7 @@ static void voice_start(slicer_t *s, int note, int velocity) {
     v->env_attack  = ms_to_coeff(s->attack_ms,  0.001f); /* attack → 1.0 */
     v->env_decay   = ms_to_coeff(s->decay_ms,   0.001f); /* decay  → 0.0 */
     v->velocity    = velocity / 127.0f;
+    v->release     = 0;
 }
 
 static void voice_release(voice_t *v) {
@@ -385,8 +402,13 @@ static void v2_on_midi(void *inst, const uint8_t *msg, int len, int source) {
 
 static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
     slicer_t *s = inst;
-    memset(out_lr, 0, frames * 2 * sizeof(int16_t));
-    if (!s->sample_data) return;
+    if (!s->sample_data) { memset(out_lr, 0, frames * 2 * sizeof(int16_t)); return; }
+
+    /* accumulate all voices in float to avoid per-voice int16 clipping */
+    float mix_l[BLOCK_SIZE];
+    float mix_r[BLOCK_SIZE];
+    memset(mix_l, 0, frames * sizeof(float));
+    memset(mix_r, 0, frames * sizeof(float));
 
     for (int vi = 0; vi < MAX_VOICES; vi++) {
         voice_t *v = &s->voices[vi];
@@ -394,10 +416,11 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
 
         for (int i = 0; i < frames; i++) {
             /* envelope */
+            if (v->env_state == ENV_IDLE) { v->active = 0; v->env_val = 0.0f; break; }
             float env = v->env_val;
             switch (v->env_state) {
                 case ENV_ATTACK:
-                    env = env + (1.0f - env) * (1.0f - v->env_attack);
+                    env = env + (1.0f - env) * (1.0f - v->env_decay);
                     if (env >= 0.999f) {
                         env = 1.0f;
                         v->env_state = (!s->mode_gate) ? ENV_DECAY : ENV_SUSTAIN;
@@ -407,7 +430,7 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
                     env = 1.0f;
                     break;
                 case ENV_DECAY:
-                    env *= v->env_decay;
+                    env *= v->env_attack;
                     if (env < 0.0001f) {
                         env = 0.0f;
                         v->env_state = ENV_IDLE;
@@ -422,14 +445,15 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
             if (!v->active) break;
 
             /* read position — check BEFORE any sample access */
-            int32_t pos_int = v->pos >> 16;
+            int32_t pos_int = (int32_t)(v->pos >> 16);
             if (pos_int >= v->slice_end) {
-                v->active = 0;
-                break;
+                /* start release fade on first overrun; clamp to last valid frame */
+                if (v->release == 0) v->release = RELEASE_SAMPLES;
+                pos_int = v->slice_end - 1;
             }
 
             /* linear interpolation — safe clamp for lookahead */
-            float frac       = (v->pos & 0xFFFF) / 65536.0f;
+            float frac       = (uint32_t)(v->pos & 0xFFFF) / 65536.0f;
             int32_t pos_next = pos_int + 1;
             if (pos_next >= v->slice_end) pos_next = pos_int;
 
@@ -438,19 +462,26 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
             float r = s->sample_data[pos_int*2+1] * (1.0f - frac)
                     + s->sample_data[pos_next*2+1] * frac;
 
+            /* apply release fade on top of envelope */
             float amp = v->velocity * s->gain * env;
-            l *= amp;
-            r *= amp;
+            if (v->release > 0) {
+                amp *= (float)v->release / (float)RELEASE_SAMPLES;
+                if (--v->release == 0) { v->active = 0; v->env_val = 0.0f; }
+            }
 
-            /* clamp and mix */
-            int32_t ol = out_lr[i*2]   + (int32_t)l;
-            int32_t or_ = out_lr[i*2+1] + (int32_t)r;
-            out_lr[i*2]   = (int16_t)(ol >  32767 ?  32767 : ol < -32768 ? -32768 : ol);
-            out_lr[i*2+1] = (int16_t)(or_ >  32767 ?  32767 : or_ < -32768 ? -32768 : or_);
+            mix_l[i] += l * amp;
+            mix_r[i] += r * amp;
+            if (!v->active) break;
 
             /* advance position */
-            v->pos += (int32_t)(v->rate * 65536.0f);
+            v->pos += (int64_t)(v->rate * 65536.0f);
         }
+    }
+
+    /* single clamp pass after all voices are mixed */
+    for (int i = 0; i < frames; i++) {
+        out_lr[i*2]   = clamp16(mix_l[i]);
+        out_lr[i*2+1] = clamp16(mix_r[i]);
     }
 }
 
