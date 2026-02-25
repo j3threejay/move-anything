@@ -47,7 +47,7 @@ typedef struct {
     int       slice_count_actual;           /* how many slices detected */
 
     /* params */
-    float     sensitivity;   /* 0.0–1.0 */
+    float     threshold;     /* 0.0–1.0 (renamed from sensitivity) */
     int       slice_count;   /* 8/16/32/64/128 */
     float     pitch;         /* semitones ±24 */
     float     gain;
@@ -56,6 +56,9 @@ typedef struct {
     float     decay_ms;
     float     start_trim;    /* 0.0–1.0 */
     float     end_trim;      /* 0.0–1.0 */
+
+    /* state */
+    int       slicer_state;  /* 0=IDLE, 1=READY, 2=NO_SLICES */
 
     /* voices */
     voice_t   voices[MAX_VOICES];
@@ -187,9 +190,9 @@ static void detect_slices(slicer_t *s) {
     if (region <= 0) return;
 
     int win = 512; /* analysis window in frames */
-    float threshold = 1.5f + (1.0f - s->sensitivity) * 8.0f;
-    /* sensitivity=1.0 → threshold=1.5 (very sensitive) */
-    /* sensitivity=0.0 → threshold=9.5 (only loud hits) */
+    float det_threshold = 1.5f + (1.0f - s->threshold) * 8.0f;
+    /* threshold=1.0 → det_threshold=1.5 (very sensitive) */
+    /* threshold=0.0 → det_threshold=9.5 (only loud hits) */
 
     int32_t markers[MAX_SLICES];
     int     nmarkers = 0;
@@ -207,7 +210,7 @@ static void detect_slices(slicer_t *s) {
         }
         rms = sqrtf(rms / (win * 2));
 
-        if (rms > prev_rms * threshold && rms > 0.01f) {
+        if (rms > prev_rms * det_threshold && rms > 0.01f) {
             /* avoid double-triggers: enforce min gap */
             int32_t min_gap = SAMPLE_RATE / 32; /* ~3ms */
             if (nmarkers == 0 || (i - markers[nmarkers-1]) > min_gap) {
@@ -283,7 +286,7 @@ static void voice_release(voice_t *v) {
 static void* v2_create_instance(const char *module_dir, const char *json_defaults) {
     (void)module_dir; (void)json_defaults;
     slicer_t *s = calloc(1, sizeof(slicer_t));
-    s->sensitivity  = 0.5f;
+    s->threshold    = 0.5f;
     s->slice_count  = 16;
     s->pitch        = 0.0f;
     s->gain         = 0.8f;
@@ -292,6 +295,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     s->decay_ms     = 200.0f;
     s->start_trim   = 0.0f;
     s->end_trim     = 1.0f;
+    s->slicer_state = 0;
     return s;
 }
 
@@ -304,13 +308,13 @@ static void v2_destroy_instance(void *inst) {
 static void v2_set_param(void *inst, const char *key, const char *val) {
     slicer_t *s = inst;
 
-    if (strcmp(key, "sensitivity") == 0) {
-        s->sensitivity = atof(val);
-        detect_slices(s);
+    if (strcmp(key, "threshold") == 0) {
+        s->threshold    = atof(val);
+        s->slicer_state = 0; /* back to IDLE — re-scan needed */
     } else if (strcmp(key, "slices") == 0) {
         int n = atoi(val);
         if (n==8||n==16||n==32||n==64||n==128) s->slice_count = n;
-        detect_slices(s);
+        s->slicer_state = 0;
     } else if (strcmp(key, "pitch") == 0) {
         s->pitch = atof(val);
     } else if (strcmp(key, "gain") == 0) {
@@ -322,29 +326,37 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
     } else if (strcmp(key, "decay") == 0) {
         s->decay_ms = atof(val);
     } else if (strcmp(key, "start_trim") == 0) {
-        s->start_trim = atof(val);
-        detect_slices(s);
+        s->start_trim   = atof(val);
+        s->slicer_state = 0;
     } else if (strcmp(key, "end_trim") == 0) {
-        s->end_trim = atof(val);
-        detect_slices(s);
+        s->end_trim     = atof(val);
+        s->slicer_state = 0;
     } else if (strcmp(key, "sample_path") == 0) {
-        if (load_wav(s, val)) detect_slices(s);
+        /* load only — user must trigger scan explicitly */
+        if (load_wav(s, val)) {
+            s->slicer_state = 0;
+        }
+    } else if (strcmp(key, "scan") == 0) {
+        /* explicit scan trigger from UI */
+        detect_slices(s);
+        s->slicer_state = (s->slice_count_actual > 0) ? 1 : 2;
     }
 }
 
 static int v2_get_param(void *inst, const char *key, char *buf, int buf_len) {
     slicer_t *s = inst;
-    if (strcmp(key, "sensitivity") == 0)  return snprintf(buf, buf_len, "%.3f", s->sensitivity);
-    if (strcmp(key, "slices") == 0)        return snprintf(buf, buf_len, "%d",   s->slice_count);
-    if (strcmp(key, "pitch") == 0)         return snprintf(buf, buf_len, "%.1f", s->pitch);
-    if (strcmp(key, "gain") == 0)          return snprintf(buf, buf_len, "%.3f", s->gain);
-    if (strcmp(key, "mode") == 0)          return snprintf(buf, buf_len, "%s",   s->mode_gate ? "gate" : "trigger");
-    if (strcmp(key, "attack") == 0)        return snprintf(buf, buf_len, "%.1f", s->attack_ms);
-    if (strcmp(key, "decay") == 0)         return snprintf(buf, buf_len, "%.1f", s->decay_ms);
-    if (strcmp(key, "start_trim") == 0)    return snprintf(buf, buf_len, "%.4f", s->start_trim);
-    if (strcmp(key, "end_trim") == 0)      return snprintf(buf, buf_len, "%.4f", s->end_trim);
-    if (strcmp(key, "sample_path") == 0)   return snprintf(buf, buf_len, "%s",   s->sample_path);
-    if (strcmp(key, "slice_count_actual") == 0) return snprintf(buf, buf_len, "%d", s->slice_count_actual);
+    if (strcmp(key, "threshold") == 0)          return snprintf(buf, buf_len, "%.3f", s->threshold);
+    if (strcmp(key, "slices") == 0)              return snprintf(buf, buf_len, "%d",   s->slice_count);
+    if (strcmp(key, "pitch") == 0)               return snprintf(buf, buf_len, "%.1f", s->pitch);
+    if (strcmp(key, "gain") == 0)                return snprintf(buf, buf_len, "%.3f", s->gain);
+    if (strcmp(key, "mode") == 0)                return snprintf(buf, buf_len, "%s",   s->mode_gate ? "gate" : "trigger");
+    if (strcmp(key, "attack") == 0)              return snprintf(buf, buf_len, "%.1f", s->attack_ms);
+    if (strcmp(key, "decay") == 0)               return snprintf(buf, buf_len, "%.1f", s->decay_ms);
+    if (strcmp(key, "start_trim") == 0)          return snprintf(buf, buf_len, "%.4f", s->start_trim);
+    if (strcmp(key, "end_trim") == 0)            return snprintf(buf, buf_len, "%.4f", s->end_trim);
+    if (strcmp(key, "sample_path") == 0)         return snprintf(buf, buf_len, "%s",   s->sample_path);
+    if (strcmp(key, "slice_count_actual") == 0)  return snprintf(buf, buf_len, "%d",   s->slice_count_actual);
+    if (strcmp(key, "slicer_state") == 0)        return snprintf(buf, buf_len, "%d",   s->slicer_state);
     return -1;
 }
 

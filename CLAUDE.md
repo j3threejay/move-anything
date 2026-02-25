@@ -17,76 +17,99 @@ Fork of charlesvestal/move-anything. Primary work: a custom **Slicer** sound gen
 A transient-detection sampler with up to 128 auto-slices, polyphonic playback, A/D envelope, and WAV file browser.
 
 **Files:**
-- `dsp.c` — Plugin API v2 C DSP: WAV loader (16-bit and 24-bit PCM, proper chunk scanning), energy-based RMS transient detection, 8-voice polyphony, linear interpolation playback
-- `ui_chain.js` — Signal Chain UI shim (QuickJS ES module): file browser, param display, MIDI input
+- `dsp.c` — Plugin API v2 C DSP: WAV loader (16/24-bit PCM, proper RIFF chunk scanning), energy-based RMS transient detection, 8-voice polyphony, linear interpolation playback
+- `ui_chain.js` — Signal Chain UI shim v2 (QuickJS ES module): state machine (IDLE/READY/NO_SLICES), file browser, param display, explicit scan trigger
 - `module.json` — `"name": "Slicer"`, `"api_version": 2`, `"component_type": "sound_generator"`, `"chainable": true`
 
 **DSP params exposed:**
-`sensitivity`, `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (0–500ms), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only)
+`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (0–500ms), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection)
 
-**UI controls (no shift required — shim consumes CC49 before JS sees it):**
-- Jog Click (main) → open file browser
-- Jog Click (browser) → enter folder / select WAV
-- Back (main) → advanced view
-- Back (browser or advanced) → main
-- Jog rotate → scroll browser / adjust sensitivity (main) / cycle mode (advanced)
-- Knobs 1–4 (main): sensitivity / slices / pitch / gain
-- Knobs 1–4 (advanced): attack / decay / start_trim / end_trim
+**UI state machine:**
+- **IDLE**: sample loaded, not yet scanned → Jog Click triggers scan
+- **READY**: slices detected → shows slice count, Jog Click goes to advanced
+- **NO_SLICES**: scan ran but found nothing → prompt to lower threshold
+
+**UI navigation (shift unavailable — CC49 consumed by shim):**
+
+| Input | Main (no sample) | Main (IDLE/NO_SLICES) | Main (READY) | Browser | Advanced |
+|---|---|---|---|---|---|
+| Jog Click | → browser | → scan | → advanced | select/enter | → main |
+| Back | → browser | → browser | → browser | → main | → main |
+| Jog rotate | — | adjust threshold | adjust threshold | scroll | cycle mode |
+| Knobs 1–4 | — | threshold/pitch/gain/— | threshold/pitch/gain/— | — | attack/decay/start/end |
 
 **File browser implementation:**
-Uses QuickJS built-in `import * as os from 'os'` — `os.readdir([names, err])` for directory listing, `os.stat([stat, err])` with `(stat.mode & 0o170000) === 0o040000` for dir detection. **No built-in host file picker API exists.** Root is `/data/UserData/UserLibrary/Samples`. Confirmed working on device.
+`import * as os from 'os'` — `os.readdir([names, err])` + `os.stat([stat, err])` with `(st.mode & 0o170000) === 0o040000` for dir detection. Root: `/data/UserData/UserLibrary/Samples`. Confirmed working on device.
+
+**`setTimeout` note:** `triggerScan()` calls `setTimeout(..., 300)` for a post-scan sync. QuickJS may not have `setTimeout` — if scan click produces no UI update, this is why. The `tick()` poll will still pick up state changes from DSP.
 
 ### Deploy Script — `scripts/deploy-slicer.sh`
-Fast single-module deploy (no full install.sh needed). Cross-compiles `dsp.c` via Docker, SCPs `dsp.so + module.json + ui_chain.js` to device, restarts Move service.
+Cross-compiles `dsp.c` via Docker, SCPs `dsp.so + module.json + ui_chain.js`, restarts service.
 
 ```bash
 ./scripts/deploy-slicer.sh                         # uses move.local
-MOVE_HOST=192.168.x.x ./scripts/deploy-slicer.sh  # override host
+MOVE_HOST=192.168.68.62 ./scripts/deploy-slicer.sh # override with IP (more reliable)
 ```
 
-SSH users: `ableton@move.local` (file ops, data partition), `root@move.local` (service restart)
+If deploy-slicer.sh SSH step times out (known intermittent issue), deploy manually:
+```bash
+DEST="/data/UserData/move-anything/modules/sound_generators/slicer"
+SRC="src/modules/sound_generators/slicer"
+OUT="build/modules/sound_generators/slicer"
+scp -o ConnectTimeout=10 "$OUT/dsp.so" "$SRC/module.json" "$SRC/ui_chain.js" "ableton@move.local:$DEST/" && \
+ssh -o ConnectTimeout=10 -n root@move.local "/etc/init.d/move stop; sleep 1; /etc/init.d/move start"
+```
+
+SSH users: `ableton@move.local` (file ops), `root@move.local` (service restart)
 
 ### build.sh additions
-`scripts/build.sh` has a Slicer build step that cross-compiles `src/modules/sound_generators/slicer/dsp.c` → `build/modules/sound_generators/slicer/dsp.so`.
+`scripts/build.sh` cross-compiles `src/modules/sound_generators/slicer/dsp.c` → `build/modules/sound_generators/slicer/dsp.so`.
 
 ## SSH / Deploy Requirements
 - Move on WiFi, SSH key added at http://move.local/development/ssh
 - Both devices on same network
 - Docker installed (for cross-compilation)
 - `install.sh local` requires interactive TTY — run directly in terminal, not via script
+- `move.local` mDNS sometimes flaky — use IP `192.168.68.62` if hostname fails
 
 ## Accessing Slicer on Move
 Shadow UI → Sound Generators → Slicer → add to Signal Chain
 
 ## Debug Logging
-Enable on device: `ssh ableton@move.local 'touch /data/UserData/move-anything/debug_log_on'`
-Watch log: `ssh ableton@move.local 'tail -f /data/UserData/move-anything/debug.log'`
+Enable: `ssh ableton@move.local 'touch /data/UserData/move-anything/debug_log_on'`
+Watch: `ssh ableton@move.local 'tail -f /data/UserData/move-anything/debug.log'`
 
 Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 
 ## MIDI Routing in ui_chain.js — Critical Notes
-- **CC 49 (Shift) is consumed by the shim** before reaching any JS. Do not rely on shift state in ui_chain.js — it will never be set.
-- **chain/ui.js** only intercepts `Shift+Menu` (CC50+shift) when `componentUiActive`. Everything else — including plain jog click, Back, knobs — passes directly to `componentUi.onMidiMessageInternal(data)`.
-- **CC 50 (Menu)** exits to session view at a level above chain/ui.js — never use as a module trigger.
-- **CC 51 (Back)** reaches ui_chain.js cleanly and is safe to use.
+- **CC 49 (Shift) is consumed by the shim** — never reaches JS. `shiftHeld` will always be false in ui_chain.js. Do not design any feature around shift state.
+- **chain/ui.js** only intercepts `Shift+Menu` (CC50) when `componentUiActive`. Everything else passes to `componentUi.onMidiMessageInternal(data)`.
+- **CC 50 (Menu)** — exits to session view above chain/ui.js. Never use as trigger.
+- **CC 51 (Back)** — reaches ui_chain.js cleanly.
+- **CC 3 (Jog Click), CC 14 (Jog rotate), CC 71–74 (Knobs 1–4)** — all pass through cleanly.
 
-## Known Bugs Fixed This Session
-- **WAV loader silent failure**: Professional WAV files (Ableton, Pro Tools, Logic exports) have a `JUNK` chunk between the `WAVE` marker and the `fmt ` chunk. The old 44-byte flat header reader treated JUNK data as format fields → `channels=0` → `frames=0` → `slice_count_actual=0` → silence. Fixed by scanning chunks properly.
-- **24-bit WAV support**: Added — reads raw bytes, shifts right 8 bits to 16-bit on load.
-- **Shift+Jog Click browser trigger**: Didn't work because shim consumes CC49. Changed browser trigger to plain Jog Click from main view.
+## Bugs Fixed
+- **WAV JUNK chunk**: Pro WAVs have a `JUNK` chunk before `fmt `. Old 44-byte flat reader → `channels=0` → silence. Fixed with proper RIFF chunk scanner.
+- **24-bit WAV**: Added support — reads 3 bytes/sample, shifts to 16-bit.
+- **Shift+Jog browser trigger**: Shim consumes CC49. Redesigned navigation to use plain Jog Click and Back (no shift needed).
+- **Auto-detect on load removed**: DSP now stays IDLE until `scan=1` is set explicitly. Prevents detecting slices on wrong params before user is ready.
+- **`sensitivity` renamed `threshold`**: Matches UI intent — controls transient detection sensitivity.
 
 ## Current Status (end of session)
-- ✅ File browser: working, navigates subdirs, selects WAV files
-- ✅ WAV loading: fixed for JUNK-chunk WAVs and 24-bit files, deployed
-- ⏳ Playback with real samples: WAV fix just deployed, not yet confirmed sounding
+- ✅ File browser: working — navigates subdirs, selects WAV, confirmed on device
+- ✅ WAV loading: JUNK-chunk + 24-bit PCM support deployed
+- ✅ State machine UI: IDLE/READY/NO_SLICES flow deployed
+- ✅ Explicit scan trigger: Jog Click → `scan=1` → DSP detects → state updates
+- ⏳ End-to-end playback: WAV fix + state machine deployed together but not yet confirmed sounding by user
+- ⏳ `setTimeout` in triggerScan: may not work in QuickJS — tick poll is fallback
 - ⏳ Transient detection quality: untested with real material
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## Next Steps
-- [ ] Confirm playback works with real samples after WAV loader fix
-- [ ] Test transient detection quality — tune sensitivity range if needed
-- [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI param editing
-- [ ] Consider adding sample name display in browser (currently truncated to 17 chars — may need scroll or shorter display)
+- [ ] Confirm end-to-end: load sample → scan → pads trigger sound
+- [ ] Verify `setTimeout` works in QuickJS; if not, replace with tick-counter poll in triggerScan
+- [ ] Test transient detection quality with real drum loops — tune threshold range if needed
+- [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping
 
 ---
 
