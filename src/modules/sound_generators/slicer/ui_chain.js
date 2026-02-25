@@ -1,21 +1,14 @@
 /*
  * Slicer — ui_chain.js v3
  *
- * Hardware MIDI mappings (confirmed):
+ * Confirmed hardware MIDI mappings:
  *   Jog rotate = CC14
- *   Jog click  = CC9 — intercepted by chain/ui.js, NEVER reaches us
+ *   Jog click  = CC9 (works inside browser; may be eaten upstream from main view)
  *   Knobs 1-8  = CC71-78
  *   Pads       = Notes 68-99
- *   Knob touch = Notes 0-7 — intercepted by chain/ui.js, never reaches us
- *
- * Navigation (no jog click available):
- *   Jog rotate with no sample → opens browser
- *   Jog rotate in browser     → scroll list
- *   Jog rotate in main/idle   → adjust threshold
- *   Knob 1 touch (Note 0, val>0) → open browser  [if chain ever forwards it]
+ *   Knob touch = Notes 0-7 — eaten by chain/ui.js, never reaches us
  *
  * On init: browser opens automatically if no sample loaded.
- *
  * Bank switching: rotating knobs 1-4 = bank A, knobs 5-8 = bank B.
  */
 
@@ -31,9 +24,10 @@ const SAMPLES_DIR      = '/data/UserData/UserLibrary/Samples';
 const SCREEN_W         = 128;
 const SCAN_FLASH_TICKS = 120;
 const LOOP_LABELS      = ['Off', 'Loop', 'Ping'];
+const JOG_CLICK        = 9;   /* confirmed CC9 on hardware */
 
 const s = {
-    view:     'browser',  /* start in browser */
+    view:     'browser',
     knobBank: 'A',
     dirty:    true,
     sampleName:       '',
@@ -55,7 +49,6 @@ const s = {
     browserEntries:   [],
     browserCursor:    0,
     browserScroll:    0,
-    overlayCursor:    0,
 };
 
 function gp(key, fallback) {
@@ -151,15 +144,15 @@ function drawSampleName() {
 }
 function drawIdle() {
     clear_screen(); drawSampleName();
-    print(0, 20, 'Jog: scan', 1);
+    print(0, 20, 'Jog click: scan', 1);
     print(0, 32, 'Thresh:' + Math.round(s.threshold*100) + '%', 1);
-    print(0, 44, 'K5-8: mode/pitch/gain', 1);
+    print(0, 44, 'Jog: adjust thresh', 1);
 }
 function drawNoSlices() {
     clear_screen(); drawSampleName();
     print(0, 20, 'No slices found', 1);
     print(0, 32, 'Lower threshold', 1);
-    print(0, 44, 'Jog: adjust/scan', 1);
+    print(0, 44, 'Jog: adjust/click:scan', 1);
 }
 function drawScanFlash() {
     clear_screen(); drawSampleName();
@@ -195,7 +188,7 @@ function drawSensitivity() {
     print(0, 14, 'Sensitivity', 1);
     fill_rect(0, 26, Math.round(s.threshold*100), 8, 1);
     print(0, 38, Math.round(s.threshold*100)+'%', 1);
-    print(0, 50, 'Jog:adjust', 1);
+    print(0, 50, 'Jog:adjust  Clk:scan', 1);
 }
 
 function tick() {
@@ -212,7 +205,7 @@ function tick() {
 
     if (s.view === 'browser')     { drawBrowser();     return; }
     if (s.view === 'sensitivity') { drawSensitivity(); return; }
-    if (!s.samplePath)            { drawBrowser();     return; }  /* fallback: no sample → browser */
+    if (!s.samplePath)            { drawBrowser();     return; }
     if (s.slicerState === 0)      { drawIdle();        return; }
     if (s.slicerState === 2)      { drawNoSlices();    return; }
     if (s.scanFlashTicks > 0)     { drawScanFlash();   return; }
@@ -225,14 +218,13 @@ function onMidiMessageInternal(data) {
     const byte1  = data[1];
     const byte2  = data[2];
 
-    /* Pad hit: select slice */
+    /* Pad hit: select slice, exit browser if open */
     if (status === 0x90 && byte2 > 0 && byte1 >= 68 && byte1 <= 99) {
         if (s.slicerState === 1) {
             const slice = byte1 % s.sliceCountActual;
             if (slice !== s.selectedSlice) { s.selectedSlice = slice; syncPad(); }
             s.knobBank = 'A'; s.dirty = true;
-            /* hitting a pad while in browser exits to main */
-            if (s.view === 'browser') { s.view = 'main'; }
+            if (s.view !== 'main') { s.view = 'main'; }
         }
         return;
     }
@@ -240,22 +232,29 @@ function onMidiMessageInternal(data) {
     if (status !== 0xB0) return;
     const cc = byte1, val = byte2;
 
-    /* Jog rotate */
+    /* Jog rotate (CC14) */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(val);
         if (s.view === 'browser')     { browserScrollBy(delta); return; }
         if (s.view === 'sensitivity') { adjustThreshold(delta); return; }
-        /* main — no sample: go to browser */
         if (!s.samplePath) { s.view = 'browser'; s.dirty = true; return; }
-        /* main — idle/no_slices: adjust threshold */
         if (s.slicerState !== 1) { adjustThreshold(delta); return; }
+        return;
+    }
+
+    /* Jog click (CC9) — works in browser, may be eaten from main view */
+    if (cc === JOG_CLICK && val > 0) {
+        if (s.view === 'browser')     { browserSelect(); return; }
+        if (s.view === 'sensitivity') { triggerScan(); s.view = 'main'; s.dirty = true; return; }
+        /* main view */
+        if (s.slicerState !== 1) { triggerScan(); return; }
+        s.view = 'sensitivity'; s.dirty = true;
         return;
     }
 
     /* Knobs 1-4: bank A */
     if (cc===MoveKnob1||cc===MoveKnob2||cc===MoveKnob3||cc===MoveKnob4) {
         s.knobBank='A'; s.dirty=true;
-        if (s.view==='browser') { browserSelect(); return; } /* knob 1 press = select in browser */
         if (s.slicerState!==1) return;
         const d=decodeDelta(val);
         if (cc===MoveKnob1) adjustStartTrim(d);
@@ -268,7 +267,6 @@ function onMidiMessageInternal(data) {
     /* Knobs 5-8: bank B */
     if (cc===MoveKnob5||cc===MoveKnob6||cc===MoveKnob7||cc===MoveKnob8) {
         s.knobBank='B'; s.dirty=true;
-        if (s.view==='browser') { s.view='sensitivity'; s.dirty=true; return; } /* knob 5 = go to sensitivity */
         const d=decodeDelta(val);
         if (cc===MoveKnob5) adjustMode(d);
         if (cc===MoveKnob6) adjustPitch(d);
@@ -281,9 +279,7 @@ function onMidiMessageInternal(data) {
 function init() {
     syncAll();
     browserOpen(SAMPLES_DIR);
-    /* Auto-open browser if no sample loaded */
-    if (!s.samplePath) { s.view = 'browser'; }
-    else               { s.view = 'main'; }
+    s.view  = s.samplePath ? 'main' : 'browser';
     s.dirty = true;
 }
 
