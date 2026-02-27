@@ -6,7 +6,14 @@
       "Bash(brew install --cask docker)",
       "Bash(docker info --format '{{.ServerVersion}}' 2>&1)",
       "Bash(./scripts/build.sh 2>&1)",
-      "Bash(./scripts/install.sh local 2>&1)"
+      "Bash(./scripts/install.sh local 2>&1)",
+      "Bash(git add src/modules/sound_generators/slicer/dsp.c && git commit -m \"Fix slice mapping\")",
+      "Bash(git add src/modules/sound_generators/slicer/ui_chain.js && git commit -m \"Fix per-pad params slice index\")",
+      "Bash(git add src/modules/sound_generators/slicer/ui_chain.js && git commit -m \"Fix browser hover preview\")",
+      "Bash(MOVE_HOST=172.16.254.1 ./scripts/deploy-slicer.sh 2>&1)",
+      "Bash(git add src/modules/sound_generators/slicer/dsp.c src/modules/sound_generators/slicer/ui_chain.js && git commit -m \"Fix per-pad per-slice params\")",
+      "Bash(DEST=\"/data/UserData/move-anything/modules/sound_generators/slicer\"\nSRC=\"src/modules/sound_generators/slicer\"\nOUT=\"build/modules/sound_generators/slicer\"\nscp -o ConnectTimeout=10 -o StrictHostKeyChecking=no \"$OUT/dsp.so\" \"$SRC/module.json\" \"$SRC/ui_chain.js\" \"ableton@172.16.254.1:$DEST/\" && \\\\\nssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -n root@172.16.254.1 \"/etc/init.d/move stop; sleep 1; /etc/init.d/move start\")",
+      "Bash(git add -A && git commit -m \"WIP: end of session snapshot\" && git push origin main)"
     ]
   }
 }

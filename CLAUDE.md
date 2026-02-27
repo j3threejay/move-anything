@@ -104,6 +104,8 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **End-of-slice hard cutoff causing tin-can ringing**: Replaced immediate `active=0` at slice end with a 64-sample (~1.5ms) linear release fade. Voice holds last frame at decaying amplitude until the countdown reaches zero.
 - **Back button exits chain UI**: `MoveBack` (CC51) is intercepted by the chain host and exits the component — cannot be used for in-component navigation.
 - **Attack/decay coefficients swapped in render_block**: `ENV_ATTACK` was using `v->env_attack` and `ENV_DECAY` was using `v->env_decay` — behavior was inverted on hardware. Fixed by swapping: `ENV_ATTACK` now uses `v->env_decay` and `ENV_DECAY` uses `v->env_attack` in the render loop.
+- **Browser hover preview never fired**: `sp('preview_path', ...)` was only called from `browserScrollBy` — cursor position 0 on open never triggered audio. Fixed by firing preview for entry[0] at end of `browserOpen`.
+- **Note mapping comment mismatch fixed**: ui_chain.js top-of-file comment now correctly reflects pad mapping (note-68, 0-31) matching DSP.
 
 ## Navigation — Final Design
 - **Back (CC51)**: exits chain UI entirely — do NOT use for in-component navigation
@@ -123,6 +125,12 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - mDNS `move.local` resolves but SCP/SSH may need `-o StrictHostKeyChecking=no` if IP changed.
 - Last known IP: `172.16.254.1` (USB network interface, stable) — prefer this over WiFi IP.
 
+## Note → Slice Mapping (current design)
+- **Move pads (notes 68–99)**: `slice_idx = note - 68` → slices 0–31 (direct pad mapping, both DSP and UI)
+- **All other notes**: `slice_idx = note - 36` (chromatic from C2)
+- Notes outside `[0, slice_count_actual)` are silently ignored in DSP and UI
+- Design tension: notes 36–67 AND pads 68–99 both address slices 0–31 (overlap). Slices 32–63 unreachable unless >32 slices and using chromatic notes. Accepted trade-off: pads must work for typical drum loops (8–32 slices).
+
 ## Current Status (end of session)
 - ✅ File browser: working — navigates subdirs, selects WAV
 - ✅ WAV loading: JUNK-chunk + 24-bit PCM support
@@ -132,14 +140,16 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Voice stealing: same-note steal + memset on free-voice steal
 - ✅ Browser navigation: Knob 4 tap (main) + Jog Click (advanced) both open browser
 - ✅ Attack/decay swap fixed: ENV_ATTACK uses env_decay coeff, ENV_DECAY uses env_attack coeff
-- ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy; needs natural fade to zero
-- ⏳ `setTimeout` in triggerScan: may not work in QuickJS — tick poll is fallback
+- ✅ Browser hover preview: fires on open (entry[0]) and on scroll — confirmed working on device
+- ⏳ **Per-pad params: STILL NOT WORKING on device** — pad hits don't update selectedSlice display or knob targets; root cause not yet found (DSP and UI mapping are consistent, `selected_slice` param write path appears correct, unknown if `host_module_set_param` call is reaching DSP in this context)
+- ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## Next Steps
-- [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); fix 0ms decay playing full slice; smooth low-ms decay tail
-- [ ] Verify `setTimeout` works in QuickJS; if not, replace with tick-counter poll in triggerScan
+- [ ] **Debug per-pad params**: add `fprintf(stderr, ...)` to `v2_set_param` for `selected_slice` and `slice_attack` to confirm DSP is receiving writes; watch with `ssh ableton@172.16.254.1 'tail -f /data/UserData/move-anything/debug.log'`; also log in JS `selectSlice()` to confirm it's being called
+- [ ] Once per-pad confirmed working: test knob 1-4 edits (attack/decay/start/end) update per-slice and take effect on next trigger
+- [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); smooth low-ms decay tail
 - [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping
 
