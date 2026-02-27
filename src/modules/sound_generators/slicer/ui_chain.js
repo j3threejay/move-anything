@@ -4,14 +4,22 @@
  * Confirmed hardware MIDI mappings:
  *   Jog click  = CC3  (MoveMainButton)
  *   Jog rotate = CC14 (MoveMainKnob)
- *   Jog touch  = CC9  (MoveMainTouch — capacitive, NOT the click)
+ *   Jog touch  = CC9  (capacitive, NOT the click)
  *   Knobs 1-8  = CC71-78
  *   Pads       = Notes 68-99
- *   Knob touch = Notes 0-7 — eaten by chain/ui.js
+ *   Knob touch = Notes 0-7 — eaten by chain/ui.js before reaching here
  *
- * Pad-to-slice: (note - 68) % sliceCountActual
- * Per-pad params stored in JS state — NOT round-tripped from DSP after each pad hit.
- * Knob edits write to DSP and update local state directly.
+ * Note → slice mapping (mirrors DSP):
+ *   Move pads (notes 68-99): slice_idx = note - 68  (0-31)
+ *   All other notes:         slice_idx = note - 36  (C2 root, chromatic)
+ *   Out-of-range notes are ignored by DSP.
+ *
+ * Per-pad params stored in JS padState[] — NOT round-tripped from DSP after
+ * each pad hit. Knob edits write to DSP and update local state directly.
+ *
+ * READY view (bank A) shows chromatic range: C2–<endNote> (N slices)
+ *   endNote = note name of (36 + slice_count_actual - 1)
+ *   "*" appended if slice_count_actual > 91 (some slices unreachable via MIDI)
  */
 
 import * as os from 'os';
@@ -27,6 +35,12 @@ const SCREEN_W         = 128;
 const SCAN_FLASH_TICKS = 120;
 const LOOP_LABELS      = ['Off', 'Loop', 'Ping'];
 const MAX_SLICES       = 128;
+const ROOT_NOTE        = 36;   /* C2 — chromatic mapping root, matches DSP */
+const NOTE_NAMES       = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+function noteName(n) {
+    return NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1);
+}
 
 /* per-pad param cache — mirrors DSP pads[] array */
 const padState = [];
@@ -79,7 +93,7 @@ function resetPadState() {
 
 function selectSlice(idx) {
     s.selectedSlice = idx;
-    sp('selected_slice', idx);   /* tell DSP which pad to write params to */
+    sp('selected_slice', idx);
     s.dirty = true;
 }
 
@@ -116,6 +130,10 @@ function browserScrollBy(delta) {
     s.browserCursor = Math.max(0, Math.min(s.browserEntries.length - 1, s.browserCursor + delta));
     if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
     else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    /* hover preview: auto-play WAV under cursor; stop on dir or empty */
+    const e = s.browserEntries[s.browserCursor];
+    if (e && !e.dir) sp('preview_path', e.path);
+    else             sp('preview_stop', '1');
     s.dirty = true;
 }
 
@@ -124,6 +142,7 @@ function browserSelect() {
     if (!e) return;
     if (e.dir) { browserOpen(e.path); }
     else {
+        sp('preview_stop', '1');
         sp('sample_path', e.path);
         s.samplePath = e.path; s.sampleName = e.name.replace(/\.wav$/i, '');
         s.slicerState = 0; s.sliceCountActual = 0;
@@ -146,6 +165,14 @@ function adjustMode(d)      { s.mode = s.mode==='trigger'?'gate':'trigger'; sp('
 function adjustPitch(d)     { s.pitch = Math.max(-24,Math.min(24,s.pitch+d*0.5)); sp('pitch',s.pitch.toFixed(1)); s.dirty=true; }
 function adjustThreshold(d) { s.threshold=Math.max(0,Math.min(1,s.threshold+d*0.05)); sp('threshold',s.threshold.toFixed(3)); s.slicerState=0; s.dirty=true; }
 function triggerScan()      { resetPadState(); sp('scan','1'); }
+
+/* chromatic range string for READY display, e.g. "C2-D#4 (32sl)" */
+function rangeStr() {
+    if (s.sliceCountActual <= 0) return '';
+    const endNote = ROOT_NOTE + s.sliceCountActual - 1;
+    const flag = s.sliceCountActual > 91 ? '*' : '';
+    return 'C2-' + noteName(endNote) + ' (' + s.sliceCountActual + 'sl)' + flag;
+}
 
 function drawSampleName() {
     print(0, 0, (s.sampleName||'-- no sample --').substring(0,21), 1);
@@ -175,6 +202,7 @@ function drawBankA() {
     print(0, 23, 'Str:'+fmtMs(p.startTrim)+'  End:'+fmtMs(p.endTrim), 1);
     print(0, 33, 'Atk:'+Math.round(p.attack)+'ms', 1);
     print(0, 43, 'Dec:'+Math.round(p.decay)+'ms', 1);
+    print(0, 53, rangeStr().substring(0, 21), 1);
 }
 function drawBankB() {
     const p = pad();
@@ -229,10 +257,11 @@ function onMidiMessageInternal(data) {
     const byte1  = data[1];
     const byte2  = data[2];
 
-    /* Pad hit — note 68 = pad 1 = slice 0 */
+    /* Pad hit — notes 68-99, slice_idx = note - 36 (linear, matches DSP) */
     if (status === 0x90 && byte2 > 0 && byte1 >= 68 && byte1 <= 99) {
         if (s.slicerState === 1) {
-            const slice = (byte1 - 68) % s.sliceCountActual;
+            const slice = byte1 - ROOT_NOTE;
+            if (slice >= s.sliceCountActual) return;  /* pad out of range for this scan */
             if (slice !== s.selectedSlice) selectSlice(slice);
             s.knobBank = 'A'; s.dirty = true;
             if (s.view !== 'main') { s.view = 'main'; }
@@ -262,7 +291,7 @@ function onMidiMessageInternal(data) {
         return;
     }
 
-    /* Knobs 1-4: bank A */
+    /* Knobs 1-4: bank A (per-pad) */
     if (cc===MoveKnob1||cc===MoveKnob2||cc===MoveKnob3||cc===MoveKnob4) {
         s.knobBank='A'; s.dirty=true;
         if (s.slicerState!==1) return;
@@ -274,7 +303,7 @@ function onMidiMessageInternal(data) {
         return;
     }
 
-    /* Knobs 5-8: bank B */
+    /* Knobs 5-8: bank B (global) */
     if (cc===MoveKnob5||cc===MoveKnob6||cc===MoveKnob7||cc===MoveKnob8) {
         s.knobBank='B'; s.dirty=true;
         const d=decodeDelta(val);
