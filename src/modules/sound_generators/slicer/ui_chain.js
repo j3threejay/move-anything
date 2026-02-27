@@ -123,6 +123,10 @@ function browserOpen(path) {
         files.sort((a,b) => a.name.localeCompare(b.name));
         s.browserEntries = entries.concat(dirs, files);
     } catch(e) {}
+    /* trigger preview for the entry now under the cursor */
+    const e0 = s.browserEntries[0];
+    if (e0 && !e0.dir) sp('preview_path', e0.path);
+    else               sp('preview_stop', '1');
     s.dirty = true;
 }
 
