@@ -10,9 +10,9 @@
  *   Knob touch = Notes 0-7 — eaten by chain/ui.js before reaching here
  *
  * Note → slice mapping (mirrors DSP):
- *   Move pads (notes 68-99): slice_idx = note - 68  (0-31)
+ *   Move pads (notes 68-99): slice_idx = note - 68  (0-31, direct pad mapping)
  *   All other notes:         slice_idx = note - 36  (C2 root, chromatic)
- *   Out-of-range notes are ignored by DSP.
+ *   Notes outside [0, slice_count_actual) are silently ignored.
  *
  * Per-pad params stored in JS padState[] — NOT round-tripped from DSP after
  * each pad hit. Knob edits write to DSP and update local state directly.
@@ -261,10 +261,10 @@ function onMidiMessageInternal(data) {
     const byte1  = data[1];
     const byte2  = data[2];
 
-    /* Pad hit — notes 68-99, slice_idx = note - 36 (linear, matches DSP) */
+    /* Pad hit — notes 68-99, slice_idx = note - 68 (0-31, matches DSP pad mapping) */
     if (status === 0x90 && byte2 > 0 && byte1 >= 68 && byte1 <= 99) {
         if (s.slicerState === 1) {
-            const slice = byte1 - ROOT_NOTE;
+            const slice = byte1 - 68;
             if (slice >= s.sliceCountActual) return;  /* pad out of range for this scan */
             if (slice !== s.selectedSlice) selectSlice(slice);
             s.knobBank = 'A'; s.dirty = true;

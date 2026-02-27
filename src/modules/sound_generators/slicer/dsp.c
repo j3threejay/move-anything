@@ -6,10 +6,10 @@
  * Per-pad params: start_offset_ms, end_offset_ms, attack_ms, decay_ms, gain, loop_mode
  * Global params:  pitch, mode_gate, threshold, slice_count, velocity_sens
  *
- * Note → slice mapping (linear, no wrap):
- *   All notes: slice_idx = note - 36  (C2 = root, chromatic)
- *   Move pads (notes 68–99) map to slices 32–63 under this scheme.
- *   Notes that map outside [0, slice_count_actual) are silently ignored.
+ * Note → slice mapping:
+ *   Move pads (notes 68–99): slice_idx = note - 68  (0–31, direct pad mapping)
+ *   All other notes:         slice_idx = note - 36  (C2 = root, chromatic)
+ *   Notes outside [0, slice_count_actual) are silently ignored.
  *
  * Detection always finds up to MAX_SLICES (128) transients.
  * slice_count (8/16/32/64) is only used as fallback chunk size when no
@@ -314,13 +314,15 @@ static voice_t* find_voice_for_note(slicer_t *s, int note) {
 }
 
 /* note_to_slice: returns slice index for a MIDI note, or -1 if out of range.
-   All notes use a single linear chromatic mapping rooted at ROOT_NOTE (C2=36):
-     note 36 → slice 0, note 37 → slice 1, ..., note 127 → slice 91
-   Move pads (notes 68–99) map to slices 32–63 under this scheme.
-   Notes that map outside [0, slice_count_actual) are silently ignored.
-   Max reach: note 127 - 36 = 91 slices via MIDI. */
+   Move pads (notes 68–99) map directly to slices 0–31 (note - PAD_BASE).
+   All other notes use chromatic mapping from ROOT_NOTE (C2=36): note 36 → 0.
+   Notes outside [0, slice_count_actual) are silently ignored. */
 static int note_to_slice(slicer_t *s, int note) {
-    int idx = note - ROOT_NOTE;
+    int idx;
+    if (note >= PAD_BASE && note <= PAD_TOP)
+        idx = note - PAD_BASE;   /* Move pads 68–99 → slices 0–31 */
+    else
+        idx = note - ROOT_NOTE;  /* chromatic from C2 */
     if (idx < 0 || idx >= s->slice_count_actual) return -1;
     return idx;
 }
