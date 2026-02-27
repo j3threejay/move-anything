@@ -4,11 +4,17 @@
  * API v2, 44100Hz, stereo interleaved int16_t, 128 frames/block
  *
  * Per-pad params: start_offset_ms, end_offset_ms, attack_ms, decay_ms, gain, loop_mode
- * Global params:  pitch, mode_gate, threshold, slice_count
+ * Global params:  pitch, mode_gate, threshold, slice_count, velocity_sens
  *
- * Note mapping: note 0 = slice 0 (C -2), note 1 = slice 1 (C# -2), etc.
- * Detection always finds up to MAX_SLICES (128) transients regardless of slice_count.
- * slice_count is only used as fallback chunk size when no transients are found.
+ * Note → slice mapping (linear, no wrap):
+ *   All notes: slice_idx = note - 36  (C2 = root, chromatic)
+ *   Move pads (notes 68–99) map to slices 32–63 under this scheme.
+ *   Notes that map outside [0, slice_count_actual) are silently ignored.
+ *
+ * Detection always finds up to MAX_SLICES (128) transients.
+ * slice_count (8/16/32/64) is only used as fallback chunk size when no
+ * transients are found.
+ * Max chromatic reach via MIDI: note 127 - 36 = 91 slices.
  */
 
 #include "host/plugin_api_v1.h"
@@ -23,6 +29,9 @@
 #define MAX_SLICES       128
 #define MAX_VOICES       8
 #define RELEASE_SAMPLES  64   /* ~1.5ms fade-out when slice end is reached */
+#define ROOT_NOTE        36   /* C2: chromatic mapping root */
+#define PAD_BASE         68   /* Move pad 1 = MIDI note 68 = slice 0 */
+#define PAD_TOP          99   /* Move pad 32 = MIDI note 99 = slice 31 */
 
 /* loop modes */
 #define LOOP_OFF      0
@@ -45,12 +54,12 @@ typedef struct {
     int       loop_mode;     /* per-voice snapshot of pad's loop_mode */
     env_state_t env_state;
     float     env_val;
-    float     env_attack;    /* coeff per sample */
-    float     env_decay;     /* coeff per sample */
-    float     velocity;
+    float     env_attack;    /* coeff per sample (used for decay ramp — see swap note) */
+    float     env_decay;     /* coeff per sample (used for attack ramp — see swap note) */
+    float     velocity;      /* velocity gain: vel/127 when sens on, 1.0 when off */
     float     pad_gain;      /* per-pad gain snapshot */
     int       release;       /* countdown for end-of-slice fade-out */
-    int       released;      /* note has been released (gate mode) */
+    int       released;      /* note has been released (gate/loop mode) */
 } voice_t;
 
 /* ── Per-pad parameters ──────────────────────────────────────────────────── */
@@ -76,9 +85,10 @@ typedef struct {
 
     /* global params */
     float     threshold;
-    int       slice_count;   /* fallback chunk count when no transients found */
+    int       slice_count;   /* fallback chunk count: 8/16/32/64 */
     float     pitch;         /* semitones ±24 */
     int       mode_gate;     /* 0=trigger, 1=gate */
+    int       velocity_sens; /* 0=off (fixed gain 1.0), 1=on (vel/127) */
 
     /* per-pad params */
     pad_params_t pads[MAX_SLICES];
@@ -91,6 +101,12 @@ typedef struct {
 
     /* voices */
     voice_t   voices[MAX_VOICES];
+
+    /* preview playback (browser hover) */
+    int16_t  *preview_data;
+    int32_t   preview_frames;
+    int64_t   preview_pos;
+    int       preview_active;
 } slicer_t;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -128,7 +144,9 @@ static void reset_pad(pad_params_t *p) {
 }
 
 /* ── WAV loader (16-bit and 24-bit PCM, any chunk layout) ────────────────── */
-static int load_wav(slicer_t *s, const char *path) {
+/* Loads a WAV file into a newly malloc'd stereo int16 buffer.
+   On success returns 1 and sets *buf_out / *frames_out; caller must free. */
+static int load_wav_buf(const char *path, int16_t **buf_out, int32_t *frames_out) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
 
@@ -208,7 +226,14 @@ static int load_wav(slicer_t *s, const char *path) {
     }
 
     fclose(f);
+    *buf_out    = buf;
+    *frames_out = frames;
+    return 1;
+}
 
+static int load_wav(slicer_t *s, const char *path) {
+    int16_t *buf; int32_t frames;
+    if (!load_wav_buf(path, &buf, &frames)) return 0;
     if (s->sample_data) free(s->sample_data);
     s->sample_data   = buf;
     s->sample_frames = frames;
@@ -234,7 +259,7 @@ static void detect_slices(slicer_t *s) {
 
     float prev_rms = 0.001f;
 
-    /* scan for transients up to MAX_SLICES (128) — not capped by slice_count */
+    /* scan for transients up to MAX_SLICES — not capped by slice_count */
     for (int32_t i = total_start; i < total_end - win && nmarkers < MAX_SLICES; i += win/2) {
         float rms = 0.0f;
         for (int j = 0; j < win; j++) {
@@ -254,7 +279,7 @@ static void detect_slices(slicer_t *s) {
         prev_rms = rms * 0.3f + prev_rms * 0.7f;
     }
 
-    /* fallback: no transients found — divide evenly using slice_count as chunk size */
+    /* fallback: no transients — divide evenly using slice_count as chunk count */
     if (nmarkers < 2) {
         nmarkers = 0;
         int n = (s->slice_count > 0) ? s->slice_count : 16;
@@ -288,14 +313,26 @@ static voice_t* find_voice_for_note(slicer_t *s, int note) {
     return NULL;
 }
 
+/* note_to_slice: returns slice index for a MIDI note, or -1 if out of range.
+   All notes use a single linear chromatic mapping rooted at ROOT_NOTE (C2=36):
+     note 36 → slice 0, note 37 → slice 1, ..., note 127 → slice 91
+   Move pads (notes 68–99) map to slices 32–63 under this scheme.
+   Notes that map outside [0, slice_count_actual) are silently ignored.
+   Max reach: note 127 - 36 = 91 slices via MIDI. */
+static int note_to_slice(slicer_t *s, int note) {
+    int idx = note - ROOT_NOTE;
+    if (idx < 0 || idx >= s->slice_count_actual) return -1;
+    return idx;
+}
+
 static void voice_start(slicer_t *s, int note, int velocity) {
     if (s->slice_count_actual == 0 || !s->sample_data) return;
 
-    /* note 0 = slice 0 (C -2), note 1 = slice 1 (C# -2), etc.
-     * Clamp notes beyond slice_count_actual to the last slice. */
-    int slice_idx = note;
-    if (slice_idx >= s->slice_count_actual) slice_idx = s->slice_count_actual - 1;
-    if (slice_idx < 0) slice_idx = 0;
+    int slice_idx = note_to_slice(s, note);
+    fprintf(stderr, "[slicer] note=%d -> slice=%d (count=%d)%s\n",
+            note, slice_idx, s->slice_count_actual,
+            slice_idx < 0 ? " IGNORED" : "");
+    if (slice_idx < 0) return;  /* out of range — silent ignore */
 
     pad_params_t *p = &s->pads[slice_idx];
 
@@ -330,7 +367,7 @@ static void voice_start(slicer_t *s, int note, int velocity) {
        coefficient-swap bug fix. */
     v->env_attack  = ms_to_coeff(p->decay_ms,  0.001f);
     v->env_decay   = ms_to_coeff(p->attack_ms, 0.001f);
-    v->velocity    = velocity / 127.0f;
+    v->velocity    = s->velocity_sens ? (velocity / 127.0f) : 1.0f;
     v->pad_gain    = p->gain;
     v->release     = 0;
     v->released    = 0;
@@ -351,6 +388,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     s->slice_count    = 16;
     s->pitch          = 0.0f;
     s->mode_gate      = 0;
+    s->velocity_sens  = 1;
     s->selected_slice = 0;
     s->slicer_state   = 0;
     for (int i = 0; i < MAX_SLICES; i++) reset_pad(&s->pads[i]);
@@ -359,7 +397,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
 
 static void v2_destroy_instance(void *inst) {
     slicer_t *s = inst;
-    if (s->sample_data) free(s->sample_data);
+    if (s->sample_data)   free(s->sample_data);
+    if (s->preview_data)  free(s->preview_data);
     free(s);
 }
 
@@ -372,12 +411,14 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
         s->slicer_state = 0;
     } else if (strcmp(key, "slices") == 0) {
         int n = atoi(val);
-        if (n==8||n==16||n==32||n==64||n==128) s->slice_count = n;
+        if (n==8||n==16||n==32||n==64) s->slice_count = n;
         s->slicer_state = 0;
     } else if (strcmp(key, "pitch") == 0) {
         s->pitch = atof(val);
     } else if (strcmp(key, "mode") == 0) {
         s->mode_gate = (strcmp(val, "gate") == 0) ? 1 : 0;
+    } else if (strcmp(key, "velocity_sens") == 0) {
+        s->velocity_sens = atoi(val) ? 1 : 0;
     } else if (strcmp(key, "selected_slice") == 0) {
         int n = atoi(val);
         if (n >= 0 && n < MAX_SLICES) s->selected_slice = n;
@@ -404,6 +445,20 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
     } else if (strcmp(key, "scan") == 0) {
         detect_slices(s);
         s->slicer_state = (s->slice_count_actual > 0) ? 1 : 2;
+
+    /* browser hover preview */
+    } else if (strcmp(key, "preview_path") == 0) {
+        s->preview_active = 0;
+        int16_t *buf; int32_t frames;
+        if (load_wav_buf(val, &buf, &frames)) {
+            if (s->preview_data) free(s->preview_data);
+            s->preview_data   = buf;
+            s->preview_frames = frames;
+            s->preview_pos    = 0;
+            s->preview_active = 1;
+        }
+    } else if (strcmp(key, "preview_stop") == 0) {
+        s->preview_active = 0;
     }
 }
 
@@ -416,6 +471,7 @@ static int v2_get_param(void *inst, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "slices") == 0)             return snprintf(buf, buf_len, "%d",   s->slice_count);
     if (strcmp(key, "pitch") == 0)              return snprintf(buf, buf_len, "%.1f", s->pitch);
     if (strcmp(key, "mode") == 0)               return snprintf(buf, buf_len, "%s",   s->mode_gate ? "gate" : "trigger");
+    if (strcmp(key, "velocity_sens") == 0)      return snprintf(buf, buf_len, "%d",   s->velocity_sens);
     if (strcmp(key, "sample_path") == 0)        return snprintf(buf, buf_len, "%s",   s->sample_path);
     if (strcmp(key, "slice_count_actual") == 0) return snprintf(buf, buf_len, "%d",   s->slice_count_actual);
     if (strcmp(key, "slicer_state") == 0)       return snprintf(buf, buf_len, "%d",   s->slicer_state);
@@ -428,6 +484,16 @@ static int v2_get_param(void *inst, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "slice_decay") == 0)        return snprintf(buf, buf_len, "%.1f", p->decay_ms);
     if (strcmp(key, "slice_gain") == 0)         return snprintf(buf, buf_len, "%.3f", p->gain);
     if (strcmp(key, "slice_loop") == 0)         return snprintf(buf, buf_len, "%d",   p->loop_mode);
+
+    /* Shadow UI param metadata */
+    if (strcmp(key, "chain_params") == 0) {
+        const char *json =
+            "[{\"key\":\"velocity_sens\",\"name\":\"Velocity\","
+            "\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":1}]";
+        int len = (int)strlen(json);
+        if (len < buf_len) { memcpy(buf, json, (size_t)len + 1); return len; }
+        return -1;
+    }
 
     return -1;
 }
@@ -443,14 +509,19 @@ static void v2_on_midi(void *inst, const uint8_t *msg, int len, int source) {
     if (status == 0x90 && velocity > 0) {
         voice_start(s, note, velocity);
     } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
+        /* Gate mode: note-off triggers decay.
+           Loop voices in trigger mode also need note-off to exit the loop.
+           Non-looping trigger voices ignore note-off — slice plays to end. */
         voice_t *v = find_voice_for_note(s, note);
-        if (v) voice_release(v);
+        if (v && (s->mode_gate || v->loop_mode != LOOP_OFF)) {
+            voice_release(v);
+        }
     }
 }
 
 static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
     slicer_t *s = inst;
-    if (!s->sample_data) { memset(out_lr, 0, frames * 2 * sizeof(int16_t)); return; }
+    if (!s->sample_data && !s->preview_active) { memset(out_lr, 0, frames * 2 * sizeof(int16_t)); return; }
 
     float mix_l[BLOCK_SIZE];
     float mix_r[BLOCK_SIZE];
@@ -547,6 +618,17 @@ static void v2_render_block(void *inst, int16_t *out_lr, int frames) {
 
             /* advance position (direction-aware) */
             v->pos += (int64_t)(v->direction * v->rate * 65536.0f);
+        }
+    }
+
+    /* browser hover preview — plays full file at unity, stops at end */
+    if (s->preview_active && s->preview_data) {
+        for (int i = 0; i < frames; i++) {
+            int32_t pi = (int32_t)(s->preview_pos >> 16);
+            if (pi >= s->preview_frames) { s->preview_active = 0; break; }
+            mix_l[i] += (float)s->preview_data[pi*2]   * 0.7f;
+            mix_r[i] += (float)s->preview_data[pi*2+1] * 0.7f;
+            s->preview_pos += 65536LL;
         }
     }
 
