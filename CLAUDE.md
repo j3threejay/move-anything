@@ -22,7 +22,7 @@ A transient-detection sampler with up to 128 auto-slices, polyphonic playback, A
 - `module.json` — `"name": "Slicer"`, `"api_version": 2`, `"component_type": "sound_generator"`, `"chainable": true`
 
 **DSP params exposed:**
-`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (0–500ms), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection)
+`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (5–500ms, min 5), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `preview_slices` (read-only: live count during threshold adjust), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection), `selected_slice` (read/write: last played pad)
 
 **UI state machine:**
 - **IDLE**: sample loaded, not yet scanned → Jog Click triggers scan
@@ -132,6 +132,8 @@ These collide with low note range — filter them out in `onMidiMessageInternal`
 - **Slice detection capped at slice_count**: Was `nmarkers < s->slice_count` (max 16) — changed to `nmarkers < MAX_SLICES` so detection can find up to 128 transients.
 - **Browser hover preview never fired**: `sp('preview_path', ...)` was only called from `browserScrollBy` — cursor position 0 on open never triggered audio. Fixed by firing preview for entry[0] at end of `browserOpen`.
 - **Pad-to-slice mapping restored**: note-68 offset for pads (0-31), note-36 for chromatic. Pads must reach slices 0-31 for typical drum loops.
+- **Per-pad parameter display stuck on Pad 1**: Chain host blocks pad MIDI from reaching JS handler when source UI active. Fixed with DSP polling: `voice_start()` writes `selected_slice`, UI `tick()` polls it every frame.
+- **Attack 0ms kills sound**: Attack clamped to minimum 5ms in DSP `set_param`, UI knob adjuster, and module.json min.
 
 ## Navigation — Final Design
 - **Back (CC51)**: exits chain UI entirely — do NOT use for in-component navigation
@@ -168,14 +170,18 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Attack/decay swap fixed: ENV_ATTACK uses env_decay coeff, ENV_DECAY uses env_attack coeff
 - ✅ Detection cap fixed: scans up to 128 transients (was capped at slice_count=16)
 - ✅ Browser hover preview: fires on open (entry[0]) and on scroll — confirmed working on device
-- ⏳ **Per-pad params: STILL NOT WORKING on device** — pad hits don't update selectedSlice display or knob targets; root cause not yet found (DSP and UI mapping are consistent, `selected_slice` param write path appears correct, unknown if `host_module_set_param` is reaching DSP in chain context)
+- ✅ Per-pad params working: DSP sets `selected_slice` on voice_start, UI polls in tick() — display updates on any pad hit
+- ✅ Attack min clamped to 5ms: prevents silence from 0ms attack (DSP, UI, module.json all enforce)
+- ✅ Live preview slice count: threshold screen shows estimated slice count in real-time as you adjust threshold, before committing with scan
 - ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
+## DSP params exposed
+`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate), `attack` (5–500ms, min 5), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `preview_slices` (read-only: live count during threshold adjust), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection), `selected_slice` (read/write: last played pad)
+
 ## Next Steps
-- [ ] **Debug per-pad params**: add `fprintf(stderr, ...)` to `v2_set_param` for `selected_slice` and `slice_attack` to confirm DSP is receiving writes; watch with `ssh ableton@172.16.254.1 'tail -f /data/UserData/move-anything/debug.log'`; also log in JS `selectSlice()` to confirm it's being called
-- [ ] Once per-pad confirmed working: test knob 1-4 edits (attack/decay/start/end) update per-slice and take effect on next trigger
+- [ ] Test knob 1-4 edits (attack/decay/start/end) update per-slice and take effect on next trigger
 - [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); smooth low-ms decay tail
 - [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping

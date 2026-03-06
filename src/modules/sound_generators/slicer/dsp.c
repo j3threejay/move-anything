@@ -82,6 +82,7 @@ typedef struct {
     /* slices */
     int32_t   slice_points[MAX_SLICES + 1];
     int       slice_count_actual;
+    int       preview_slice_count; /* live preview during threshold adjust */
 
     /* global params */
     float     threshold;
@@ -295,6 +296,44 @@ static void detect_slices(slicer_t *s) {
 
     /* reset all per-pad params on fresh scan */
     for (int i = 0; i < MAX_SLICES; i++) reset_pad(&s->pads[i]);
+    s->preview_slice_count = s->slice_count_actual;
+}
+
+/* Count-only preview — same algorithm as detect_slices but doesn't
+   touch slice_points, pad params, or slice_count_actual.             */
+static void preview_slice_count(slicer_t *s) {
+    if (!s->sample_data || s->sample_frames == 0) { s->preview_slice_count = 0; return; }
+
+    int32_t total_end = s->sample_frames;
+    int win = 512;
+    float det_threshold = 1.5f + (1.0f - s->threshold) * 8.0f;
+    int nmarkers = 1; /* first marker at start */
+    int32_t last_marker = 0;
+    float prev_rms = 0.001f;
+
+    for (int32_t i = 0; i < total_end - win && nmarkers < MAX_SLICES; i += win/2) {
+        float rms = 0.0f;
+        for (int j = 0; j < win; j++) {
+            int32_t idx = (i + j) * 2;
+            float l = s->sample_data[idx]   / 32768.0f;
+            float r = s->sample_data[idx+1] / 32768.0f;
+            rms += l*l + r*r;
+        }
+        rms = sqrtf(rms / (win * 2));
+        if (rms > prev_rms * det_threshold && rms > 0.01f) {
+            int32_t min_gap = SAMPLE_RATE / 32;
+            if ((i - last_marker) > min_gap) {
+                nmarkers++;
+                last_marker = i;
+            }
+        }
+        prev_rms = rms * 0.3f + prev_rms * 0.7f;
+    }
+    if (nmarkers < 2) {
+        int n = (s->slice_count > 0) ? s->slice_count : 16;
+        nmarkers = n;
+    }
+    s->preview_slice_count = nmarkers;
 }
 
 /* ── Voice management ────────────────────────────────────────────────────── */
@@ -413,6 +452,7 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
     if (strcmp(key, "threshold") == 0) {
         s->threshold    = atof(val);
         s->slicer_state = 0;
+        preview_slice_count(s);
     } else if (strcmp(key, "slices") == 0) {
         int n = atoi(val);
         if (n==8||n==16||n==32||n==64) s->slice_count = n;
@@ -433,7 +473,8 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
     } else if (strcmp(key, "slice_end_trim") == 0) {
         s->pads[s->selected_slice].end_offset_ms = atof(val);
     } else if (strcmp(key, "slice_attack") == 0) {
-        s->pads[s->selected_slice].attack_ms = atof(val);
+        float a = atof(val); if (a < 5.0f) a = 5.0f;
+        s->pads[s->selected_slice].attack_ms = a;
     } else if (strcmp(key, "slice_decay") == 0) {
         s->pads[s->selected_slice].decay_ms = atof(val);
     } else if (strcmp(key, "slice_gain") == 0) {
@@ -445,7 +486,7 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
 
     /* sample + scan */
     } else if (strcmp(key, "sample_path") == 0) {
-        if (load_wav(s, val)) s->slicer_state = 0;
+        if (load_wav(s, val)) { s->slicer_state = 0; preview_slice_count(s); }
     } else if (strcmp(key, "scan") == 0) {
         detect_slices(s);
         s->slicer_state = (s->slice_count_actual > 0) ? 1 : 2;
@@ -478,6 +519,7 @@ static int v2_get_param(void *inst, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "velocity_sens") == 0)      return snprintf(buf, buf_len, "%d",   s->velocity_sens);
     if (strcmp(key, "sample_path") == 0)        return snprintf(buf, buf_len, "%s",   s->sample_path);
     if (strcmp(key, "slice_count_actual") == 0) return snprintf(buf, buf_len, "%d",   s->slice_count_actual);
+    if (strcmp(key, "preview_slices") == 0)     return snprintf(buf, buf_len, "%d",   s->preview_slice_count);
     if (strcmp(key, "slicer_state") == 0)       return snprintf(buf, buf_len, "%d",   s->slicer_state);
     if (strcmp(key, "selected_slice") == 0)     return snprintf(buf, buf_len, "%d",   s->selected_slice);
 

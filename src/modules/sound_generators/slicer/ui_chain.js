@@ -61,6 +61,7 @@ const s = {
     slicerState:      0,
     selectedSlice:    0,
     scanFlashTicks:   0,
+    previewSlices:    0,
     browserPath:      SAMPLES_DIR,
     browserEntries:   [],
     browserCursor:    0,
@@ -161,7 +162,7 @@ function fmtPitch(v) { return (v >= 0 ? '+' : '') + v.toFixed(1) + 'st'; }
 /* param adjusters — update local padState AND write to DSP */
 function adjustStartTrim(d) { pad().startTrim += d*5;                                          sp('slice_start_trim', pad().startTrim.toFixed(1)); s.dirty=true; }
 function adjustEndTrim(d)   { pad().endTrim   += d*5;                                          sp('slice_end_trim',   pad().endTrim.toFixed(1));   s.dirty=true; }
-function adjustAttack(d)    { pad().attack = Math.max(0,Math.min(500,  pad().attack+d*5));     sp('slice_attack',     pad().attack.toFixed(1));    s.dirty=true; }
+function adjustAttack(d)    { pad().attack = Math.max(5,Math.min(500,  pad().attack+d*5));     sp('slice_attack',     pad().attack.toFixed(1));    s.dirty=true; }
 function adjustDecay(d)     { pad().decay  = Math.max(0,Math.min(5000, pad().decay+d*20));     sp('slice_decay',      pad().decay.toFixed(1));     s.dirty=true; }
 function adjustGain(d)      { pad().gain   = Math.max(0,Math.min(1,    pad().gain+d*0.05));    sp('slice_gain',       pad().gain.toFixed(3));      s.dirty=true; }
 function adjustLoop(d)      { pad().loop   = Math.max(0,Math.min(2,    pad().loop+(d>0?1:-1)));sp('slice_loop',       String(pad().loop));          s.dirty=true; }
@@ -184,14 +185,14 @@ function drawSampleName() {
 }
 function drawIdle() {
     clear_screen(); drawSampleName();
-    print(0, 20, 'Jog click: scan', 1);
-    print(0, 32, 'Thresh:' + Math.round(s.threshold*100) + '%', 1);
-    print(0, 44, 'Jog: adjust thresh', 1);
+    print(0, 20, 'Thresh:' + Math.round(s.threshold*100) + '%  ~' + s.previewSlices + ' slices', 1);
+    print(0, 36, 'Jog: adjust thresh', 1);
+    print(0, 50, 'Jog click: scan', 1);
 }
 function drawNoSlices() {
     clear_screen(); drawSampleName();
     print(0, 20, 'No slices found', 1);
-    print(0, 32, 'Lower threshold', 1);
+    print(0, 32, 'Thresh:' + Math.round(s.threshold*100) + '%  ~' + s.previewSlices + ' slices', 1);
     print(0, 44, 'Jog: adjust/click:scan', 1);
 }
 function drawScanFlash() {
@@ -249,6 +250,10 @@ function tick() {
             s.knobBank = 'A';
             s.dirty = true;
         }
+    }
+    if (s.slicerState === 0 || s.slicerState === 2) {
+        const pv = parseInt(gp('preview_slices', 0));
+        if (pv !== s.previewSlices) { s.previewSlices = pv; s.dirty = true; }
     }
     if (s.scanFlashTicks > 0) { s.scanFlashTicks--; if (s.scanFlashTicks===0) s.dirty=true; }
     if (!s.dirty) return;
