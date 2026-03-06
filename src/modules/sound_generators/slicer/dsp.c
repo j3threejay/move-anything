@@ -336,6 +336,8 @@ static void voice_start(slicer_t *s, int note, int velocity) {
             slice_idx < 0 ? " IGNORED" : "");
     if (slice_idx < 0) return;  /* out of range — silent ignore */
 
+    s->selected_slice = slice_idx;
+
     pad_params_t *p = &s->pads[slice_idx];
 
     /* apply per-pad offsets to detected boundaries, clamp to file */

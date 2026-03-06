@@ -242,6 +242,14 @@ function tick() {
         if (newState === 1) { s.scanFlashTicks = SCAN_FLASH_TICKS; s.knobBank = 'A'; s.selectedSlice = 0; }
         s.dirty = true;
     }
+    if (s.slicerState === 1) {
+        const dspSlice = parseInt(gp('selected_slice', s.selectedSlice));
+        if (dspSlice >= 0 && dspSlice < s.sliceCountActual && dspSlice !== s.selectedSlice) {
+            s.selectedSlice = dspSlice;
+            s.knobBank = 'A';
+            s.dirty = true;
+        }
+    }
     if (s.scanFlashTicks > 0) { s.scanFlashTicks--; if (s.scanFlashTicks===0) s.dirty=true; }
     if (!s.dirty) return;
     s.dirty = false;

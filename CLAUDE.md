@@ -88,6 +88,31 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **CC 51 (Back)** — reaches ui_chain.js cleanly.
 - **CC 3 (Jog Click), CC 14 (Jog rotate), CC 71–74 (Knobs 1–4)** — all pass through cleanly.
 
+## Move Hardware MIDI — Verified from extending-move wiki
+Full pad layout (Control Live mode):
+```
+R1 (top):    notes 92–99
+R2:          notes 84–91
+R3:          notes 76–83
+R4 (bottom): notes 68–75
+```
+32 pads total, notes 68–99. Octave shift transposes all pad notes by ±12.
+
+**Knob touch notes:** 0–7 for knobs 1–8 (Note On velocity 127 = touched, 0 = released).
+These collide with low note range — filter them out in `onMidiMessageInternal` by checking `byte1 <= 7 && (velocity === 127 || velocity === 0)`.
+
+## Note-to-Slice Mapping — Current Design (dsp.c + ui_chain.js)
+- **Move pads (notes 68–99)**: `slice_idx = note - 68` → slices 0–31 (direct pad mapping)
+- **All other notes**: `slice_idx = note - 36` (chromatic from C2 = slice 0)
+- Notes outside `[0, slice_count_actual)` are silently ignored
+- Known trade-off: notes 36–67 AND pads 68–99 both address slices 0–31 (overlap). Slices 32–63 unreachable unless count > 32 and using chromatic notes. Accepted: pads must work for typical drum loops (8–32 slices).
+
+## Transient Detection — Current Design
+- Always scans up to MAX_SLICES (128) transients — NOT capped by `slice_count`
+- `slice_count` is only used as fallback chunk size when zero transients are found
+- Threshold knob: lower = more sensitive = more slices detected
+- min_gap between markers = SAMPLE_RATE/32 (~1.4ms) to avoid false doubles
+
 ## Bugs Fixed
 - **WAV JUNK chunk**: Pro WAVs have a `JUNK` chunk before `fmt `. Old 44-byte flat reader → `channels=0` → silence. Fixed with proper RIFF chunk scanner.
 - **24-bit WAV**: Added support — reads 3 bytes/sample, shifts to 16-bit.
@@ -104,8 +129,9 @@ Key log components: `[shim]`, `[shadow]`, `[shadow_ui]`, `[chain]`, `[chain-v2]`
 - **End-of-slice hard cutoff causing tin-can ringing**: Replaced immediate `active=0` at slice end with a 64-sample (~1.5ms) linear release fade. Voice holds last frame at decaying amplitude until the countdown reaches zero.
 - **Back button exits chain UI**: `MoveBack` (CC51) is intercepted by the chain host and exits the component — cannot be used for in-component navigation.
 - **Attack/decay coefficients swapped in render_block**: `ENV_ATTACK` was using `v->env_attack` and `ENV_DECAY` was using `v->env_decay` — behavior was inverted on hardware. Fixed by swapping: `ENV_ATTACK` now uses `v->env_decay` and `ENV_DECAY` uses `v->env_attack` in the render loop.
+- **Slice detection capped at slice_count**: Was `nmarkers < s->slice_count` (max 16) — changed to `nmarkers < MAX_SLICES` so detection can find up to 128 transients.
 - **Browser hover preview never fired**: `sp('preview_path', ...)` was only called from `browserScrollBy` — cursor position 0 on open never triggered audio. Fixed by firing preview for entry[0] at end of `browserOpen`.
-- **Note mapping comment mismatch fixed**: ui_chain.js top-of-file comment now correctly reflects pad mapping (note-68, 0-31) matching DSP.
+- **Pad-to-slice mapping restored**: note-68 offset for pads (0-31), note-36 for chromatic. Pads must reach slices 0-31 for typical drum loops.
 
 ## Navigation — Final Design
 - **Back (CC51)**: exits chain UI entirely — do NOT use for in-component navigation
@@ -140,8 +166,9 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Voice stealing: same-note steal + memset on free-voice steal
 - ✅ Browser navigation: Knob 4 tap (main) + Jog Click (advanced) both open browser
 - ✅ Attack/decay swap fixed: ENV_ATTACK uses env_decay coeff, ENV_DECAY uses env_attack coeff
+- ✅ Detection cap fixed: scans up to 128 transients (was capped at slice_count=16)
 - ✅ Browser hover preview: fires on open (entry[0]) and on scroll — confirmed working on device
-- ⏳ **Per-pad params: STILL NOT WORKING on device** — pad hits don't update selectedSlice display or knob targets; root cause not yet found (DSP and UI mapping are consistent, `selected_slice` param write path appears correct, unknown if `host_module_set_param` call is reaching DSP in this context)
+- ⏳ **Per-pad params: STILL NOT WORKING on device** — pad hits don't update selectedSlice display or knob targets; root cause not yet found (DSP and UI mapping are consistent, `selected_slice` param write path appears correct, unknown if `host_module_set_param` is reaching DSP in chain context)
 - ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
@@ -333,13 +360,13 @@ Located in `src/shared/`:
 
 ## Move Hardware MIDI
 
-Pads: Notes 68-99
+Pads: Notes 68-99 (4 rows × 8 cols, bottom-left=68, top-right=99)
 Steps: Notes 16-31
 Tracks: CCs 40-43 (reversed: CC43=Track1, CC40=Track4)
 
 Key CCs: 3 (jog click), 14 (jog turn), 49 (shift), 50 (menu), 51 (back), 71-78 (knobs)
 
-Notes 0-9: Capacitive touch from knobs (filter if not needed)
+Notes 0-7: Capacitive touch from knobs 1-8 (filter if not needed)
 
 ## Audio Mailbox Layout
 
