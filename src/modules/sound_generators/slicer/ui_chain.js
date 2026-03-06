@@ -56,7 +56,7 @@ const s = {
     samplePath:       '',
     threshold:        0.5,
     pitch:            0.0,
-    mode:             'trigger',
+    mode:             'gate',
     sliceCountActual: 0,
     slicerState:      0,
     selectedSlice:    0,
@@ -80,7 +80,7 @@ function syncGlobal() {
     s.samplePath       = gp('sample_path', '');
     s.threshold        = parseFloat(gp('threshold', 0.5));
     s.pitch            = parseFloat(gp('pitch', 0.0));
-    s.mode             = gp('mode', 'trigger');
+    s.mode             = gp('mode', 'gate');
     s.sliceCountActual = parseInt(gp('slice_count_actual', 0));
     s.slicerState      = parseInt(gp('slicer_state', 0));
     s.sampleName       = s.samplePath ? s.samplePath.split('/').pop().replace(/\.wav$/i, '') : '';

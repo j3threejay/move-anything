@@ -430,7 +430,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     s->threshold      = 0.5f;
     s->slice_count    = 16;
     s->pitch          = 0.0f;
-    s->mode_gate      = 0;
+    s->mode_gate      = 1;
     s->velocity_sens  = 1;
     s->selected_slice = 0;
     s->slicer_state   = 0;
