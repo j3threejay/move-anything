@@ -19,7 +19,7 @@ A transient-detection sampler with up to 128 auto-slices, polyphonic playback, A
 **Files:**
 - `dsp.c` — Plugin API v2 C DSP: WAV loader (16/24-bit PCM, proper RIFF chunk scanning), energy-based RMS transient detection, 8-voice polyphony, linear interpolation playback
 - `ui_chain.js` — Signal Chain UI shim v2 (QuickJS ES module): state machine (IDLE/READY/NO_SLICES), file browser, param display, explicit scan trigger
-- `module.json` — `"name": "Slicer"`, `"api_version": 2`, `"component_type": "sound_generator"`, `"chainable": true`
+- `module.json` — `"name": "Sample Slicer"`, `"api_version": 2`, `"component_type": "sound_generator"`, `"chainable": true`
 
 **DSP params exposed:**
 `threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate, default gate), `attack` (5–500ms, min 5), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `preview_slices` (read-only: live count during threshold adjust), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection), `selected_slice` (read/write: last played pad)
@@ -174,6 +174,9 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Attack min clamped to 5ms: prevents silence from 0ms attack (DSP, UI, module.json all enforce)
 - ✅ Live preview slice count: threshold screen shows estimated slice count in real-time as you adjust threshold, before committing with scan
 - ✅ State persistence: get_param/set_param("state") saves and restores all slicer state across power cycles (Option B — slice boundaries saved/restored exactly, no re-scan needed)
+- ✅ Attack display offset: UI shows 0ms at bottom of range (DSP still clamps to 5ms internally)
+- ✅ Module renamed to "Sample Slicer" in module.json — displays correctly in chain overview
+- ✅ Shadow UI chain overview: shows module name instead of generic component type ("Synth"/"FX 1") when a module is loaded
 - ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
@@ -191,7 +194,6 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - Uses same `json_get_string`/`json_get_int`/`json_get_float` helpers as arp and chord modules
 
 ## Next Steps
-- [ ] Test knob 1-4 edits (attack/decay/start/end) update per-slice and take effect on next trigger
 - [ ] Fix attack/decay defaults: set decay default to max (full sustain feel); smooth low-ms decay tail
 - [ ] Test transient detection quality with real drum loops — tune threshold range if needed
 - [ ] Consider exposing `ui_hierarchy` + `chain_params` for Shadow UI knob mapping
