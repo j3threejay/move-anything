@@ -423,6 +423,55 @@ static void voice_release(voice_t *v) {
     }
 }
 
+/* ── JSON helpers for state persistence ───────────────────────────────────── */
+static int json_get_string(const char *json, const char *key, char *out, int out_len) {
+    if (!json || !key || !out || out_len < 1) return 0;
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return 0;
+    const char *colon = strchr(pos, ':');
+    if (!colon) return 0;
+    while (*colon && (*colon == ':' || *colon == ' ' || *colon == '\t')) colon++;
+    if (*colon != '"') return 0;
+    colon++;
+    const char *end = strchr(colon, '"');
+    if (!end) return 0;
+    int len = (int)(end - colon);
+    if (len >= out_len) len = out_len - 1;
+    strncpy(out, colon, len);
+    out[len] = '\0';
+    return len;
+}
+
+static int json_get_int(const char *json, const char *key, int *out) {
+    if (!json || !key || !out) return 0;
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return 0;
+    const char *colon = strchr(pos, ':');
+    if (!colon) return 0;
+    colon++;
+    while (*colon && (*colon == ' ' || *colon == '\t')) colon++;
+    *out = atoi(colon);
+    return 1;
+}
+
+static int json_get_float(const char *json, const char *key, float *out) {
+    if (!json || !key || !out) return 0;
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return 0;
+    const char *colon = strchr(pos, ':');
+    if (!colon) return 0;
+    colon++;
+    while (*colon && (*colon == ' ' || *colon == '\t')) colon++;
+    *out = (float)atof(colon);
+    return 1;
+}
+
 /* ── API callbacks ───────────────────────────────────────────────────────── */
 static void* v2_create_instance(const char *module_dir, const char *json_defaults) {
     (void)module_dir; (void)json_defaults;
@@ -504,6 +553,103 @@ static void v2_set_param(void *inst, const char *key, const char *val) {
         }
     } else if (strcmp(key, "preview_stop") == 0) {
         s->preview_active = 0;
+
+    /* ── State persistence (Option B: save/restore slice boundaries) ───── */
+    } else if (strcmp(key, "state") == 0) {
+        float fval;
+        int ival;
+        char str[512];
+
+        /* Scalar params */
+        if (json_get_float(val, "threshold", &fval)) s->threshold = fval;
+        if (json_get_int(val, "slices", &ival)) {
+            if (ival==8||ival==16||ival==32||ival==64) s->slice_count = ival;
+        }
+        if (json_get_float(val, "pitch", &fval)) s->pitch = fval;
+        if (json_get_string(val, "mode", str, sizeof(str)))
+            s->mode_gate = (strcmp(str, "gate") == 0) ? 1 : 0;
+        if (json_get_int(val, "vel_sens", &ival)) s->velocity_sens = ival ? 1 : 0;
+
+        /* Load sample from saved path */
+        if (json_get_string(val, "sample_path", str, sizeof(str)) && str[0]) {
+            load_wav(s, str);
+        }
+
+        /* Restore slice boundaries directly (no re-scan) */
+        if (json_get_int(val, "sca", &ival) && ival > 0 && ival <= MAX_SLICES) {
+            int n = ival;
+            s->slice_count_actual = n;
+
+            char csv[4096];
+            if (json_get_string(val, "sp", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i <= n && *p; i++) {
+                    s->slice_points[i] = (int32_t)atoi(p);
+                    const char *c = strchr(p, ',');
+                    if (!c) break;
+                    p = c + 1;
+                }
+            }
+
+            /* Reset pads then restore saved per-pad params */
+            for (int i = 0; i < MAX_SLICES; i++) reset_pad(&s->pads[i]);
+
+            if (json_get_string(val, "ps", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    s->pads[i].start_offset_ms = (float)atof(p);
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+            if (json_get_string(val, "pe", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    s->pads[i].end_offset_ms = (float)atof(p);
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+            if (json_get_string(val, "pa", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    float a = (float)atof(p);
+                    if (a < 5.0f) a = 5.0f;
+                    s->pads[i].attack_ms = a;
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+            if (json_get_string(val, "pd", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    s->pads[i].decay_ms = (float)atof(p);
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+            if (json_get_string(val, "pg", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    s->pads[i].gain = (float)atof(p);
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+            if (json_get_string(val, "pl", csv, sizeof(csv))) {
+                const char *p = csv;
+                for (int i = 0; i < n && *p; i++) {
+                    int lm = atoi(p);
+                    if (lm >= LOOP_OFF && lm <= LOOP_PINGPONG) s->pads[i].loop_mode = lm;
+                    const char *c = strchr(p, ','); if (!c) break; p = c + 1;
+                }
+            }
+
+            s->preview_slice_count = n;
+        }
+
+        /* Set slicer_state based on restored data */
+        if (s->sample_data && s->slice_count_actual > 0)
+            s->slicer_state = 1;  /* READY */
+        else if (s->sample_data)
+            s->slicer_state = 2;  /* NO_SLICES */
+        else
+            s->slicer_state = 0;  /* IDLE */
     }
 }
 
@@ -539,6 +685,79 @@ static int v2_get_param(void *inst, const char *key, char *buf, int buf_len) {
         int len = (int)strlen(json);
         if (len < buf_len) { memcpy(buf, json, (size_t)len + 1); return len; }
         return -1;
+    }
+
+    /* ── State persistence ──────────────────────────────────────────────── */
+    if (strcmp(key, "state") == 0) {
+        char tmp[8192];
+        int pos = 0;
+        int n = s->slice_count_actual;
+
+        pos += snprintf(tmp + pos, sizeof(tmp) - pos,
+            "{\"threshold\":%.3f,\"slices\":%d,\"pitch\":%.1f,"
+            "\"mode\":\"%s\",\"vel_sens\":%d,"
+            "\"sample_path\":\"%s\",\"sca\":%d",
+            s->threshold, s->slice_count, s->pitch,
+            s->mode_gate ? "gate" : "trigger",
+            s->velocity_sens, s->sample_path, n);
+
+        if (n > 0 && pos < (int)sizeof(tmp) - 64) {
+            /* slice_points: n+1 values */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"sp\":\"");
+            for (int i = 0; i <= n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%d",
+                                i ? "," : "", (int)s->slice_points[i]);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad start offsets */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"ps\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%.1f",
+                                i ? "," : "", s->pads[i].start_offset_ms);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad end offsets */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"pe\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%.1f",
+                                i ? "," : "", s->pads[i].end_offset_ms);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad attack */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"pa\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%.0f",
+                                i ? "," : "", s->pads[i].attack_ms);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad decay */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"pd\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%.0f",
+                                i ? "," : "", s->pads[i].decay_ms);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad gain */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"pg\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%.2f",
+                                i ? "," : "", s->pads[i].gain);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+
+            /* per-pad loop mode */
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, ",\"pl\":\"");
+            for (int i = 0; i < n && pos < (int)sizeof(tmp) - 16; i++)
+                pos += snprintf(tmp + pos, sizeof(tmp) - pos, "%s%d",
+                                i ? "," : "", s->pads[i].loop_mode);
+            pos += snprintf(tmp + pos, sizeof(tmp) - pos, "\"");
+        }
+
+        pos += snprintf(tmp + pos, sizeof(tmp) - pos, "}");
+
+        int len = pos < buf_len ? pos : buf_len - 1;
+        memcpy(buf, tmp, len);
+        buf[len] = '\0';
+        return len;
     }
 
     return -1;
