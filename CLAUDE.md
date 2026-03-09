@@ -173,12 +173,22 @@ Knob caps have capacitive touch sensors: MIDI Note On (notes 0–3 for knobs 1�
 - ✅ Per-pad params working: DSP sets `selected_slice` on voice_start, UI polls in tick() — display updates on any pad hit
 - ✅ Attack min clamped to 5ms: prevents silence from 0ms attack (DSP, UI, module.json all enforce)
 - ✅ Live preview slice count: threshold screen shows estimated slice count in real-time as you adjust threshold, before committing with scan
+- ✅ State persistence: get_param/set_param("state") saves and restores all slicer state across power cycles (Option B — slice boundaries saved/restored exactly, no re-scan needed)
 - ⏳ Attack/decay defaults and feel: decay 0ms default needs revisiting; low-ms decay tail choppy
 - ⏳ Transient detection quality: needs testing with real drum loops
 - ⏳ Shadow UI param editing (ui_hierarchy / chain_params): not implemented
 
 ## DSP params exposed
-`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate, default gate), `attack` (5–500ms, min 5), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `preview_slices` (read-only: live count during threshold adjust), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection), `selected_slice` (read/write: last played pad)
+`threshold` (0–1), `slices` (8/16/32/64/128), `pitch` (±24 semitones), `gain`, `mode` (trigger/gate, default gate), `attack` (5–500ms, min 5), `decay` (0–2000ms), `start_trim`, `end_trim`, `sample_path`, `slice_count_actual` (read-only), `preview_slices` (read-only: live count during threshold adjust), `slicer_state` (read-only: 0=IDLE/1=READY/2=NO_SLICES), `scan` (write: triggers detection), `selected_slice` (read/write: last played pad), `state` (read/write: full JSON state for persistence)
+
+### State Persistence Format
+`get_param("state")` returns JSON with all slicer state. `set_param("state", json)` restores it (Option B — slice boundaries saved exactly, no re-scan). Format:
+- Scalar params: `threshold`, `slices`, `pitch`, `mode`, `vel_sens`, `sample_path`
+- `sca` — slice_count_actual
+- `sp` — slice_points as comma-separated integers (n+1 values)
+- Per-pad arrays (comma-separated, one per slice): `ps` (start_offset_ms), `pe` (end_offset_ms), `pa` (attack_ms), `pd` (decay_ms), `pg` (gain), `pl` (loop_mode)
+- On restore: loads WAV from sample_path, restores boundaries directly, sets slicer_state (READY/NO_SLICES/IDLE)
+- Uses same `json_get_string`/`json_get_int`/`json_get_float` helpers as arp and chord modules
 
 ## Next Steps
 - [ ] Test knob 1-4 edits (attack/decay/start/end) update per-slice and take effect on next trigger
