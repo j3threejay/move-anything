@@ -1,6 +1,6 @@
 {
   "id": "slicer",
-  "name": "Slicer",
+  "name": "Sample Slicer",
   "abbrev": "SL",
   "version": "0.1.0",
   "dsp": "dsp.so",
