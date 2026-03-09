@@ -4787,7 +4787,7 @@ function buildKnobContextForKnob(knobIndex) {
             meta,
             pluginName,
             displayName,
-            title: `S${hierEditorSlot + 1}: ${pluginName} ${displayName}`
+            title: displayName
         };
     }
 
@@ -4845,7 +4845,7 @@ function buildKnobContextForKnob(knobIndex) {
                         meta,
                         pluginName,
                         displayName,
-                        title: `S${selectedSlot + 1}: ${pluginName} ${displayName}`
+                        title: displayName
                     };
                 }
                 debugLog(`buildKnobContext: no knob mapping for knobIndex=${knobIndex}, levelDef.knobs=${levelDef?.knobs ? JSON.stringify(levelDef.knobs) : 'undefined'}`);
@@ -4868,7 +4868,7 @@ function buildKnobContextForKnob(knobIndex) {
                         meta: param,
                         pluginName,
                         displayName,
-                        title: `S${selectedSlot + 1}: ${pluginName} ${displayName}`
+                        title: displayName
                     };
                 }
             }
@@ -4933,7 +4933,7 @@ function buildKnobContextForKnob(knobIndex) {
                         meta,
                         pluginName,
                         displayName,
-                        title: `MFX ${pluginName} ${displayName}`,
+                        title: displayName,
                         isMasterFx: true,
                         masterFxSlot: selectedMasterFxComponent
                     };
@@ -4953,7 +4953,7 @@ function buildKnobContextForKnob(knobIndex) {
                     meta: param,
                     pluginName,
                     displayName,
-                    title: `MFX ${pluginName} ${displayName}`,
+                    title: displayName,
                     isMasterFx: true,
                     masterFxSlot: selectedMasterFxComponent
                 };
@@ -7158,8 +7158,7 @@ function refreshPendingKnobOverlay() {
     /* Show overlay using shared overlay system */
     const mapping = knobMappings[pendingKnobIndex];
     if (mapping && mapping.name) {
-        const displayName = `S${targetSlot + 1}: ${mapping.name}`;
-        showOverlay(displayName, mapping.value);
+        showOverlay(mapping.name, mapping.value);
     } else {
         /* No mapping for this knob */
         showOverlay(`Knob ${pendingKnobIndex + 1}`, "not mapped");
@@ -7448,14 +7447,22 @@ function drawChainEdit() {
         print(textX, textY, abbrev, textColor);
     }
 
-    /* Draw component label below boxes */
+    /* Draw component label below boxes — use module name when loaded */
     const selectedComp = chainSelected ? null : CHAIN_COMPONENTS[selectedChainComponent];
     const labelY = BOX_Y + BOX_H + 4;
-    const label = chainSelected ? "Chain" : (selectedComp ? selectedComp.label : "");
+    let label = chainSelected ? "Chain" : (selectedComp ? selectedComp.label : "");
+    if (selectedComp && selectedComp.key !== "settings") {
+        const moduleData = cfg[selectedComp.key];
+        if (moduleData) {
+            const prefix = selectedComp.key === "midiFx" ? "midi_fx1" : selectedComp.key;
+            label = getSlotParam(selectedSlot, `${prefix}:name`) || moduleData.module || label;
+        }
+    }
+    label = truncateText(label, 24);
     const labelX = Math.floor((SCREEN_WIDTH - label.length * 5) / 2);
     print(labelX, labelY, label, 1);
 
-    /* Draw current module name/preset below label */
+    /* Draw preset or status below label */
     const infoY = labelY + 12;
     let infoLine = "";
     if (chainSelected) {
@@ -7464,12 +7471,10 @@ function drawChainEdit() {
     } else if (selectedComp && selectedComp.key !== "settings") {
         const moduleData = cfg[selectedComp.key];
         if (moduleData) {
-            /* Get display name from DSP if available */
             const prefix = selectedComp.key === "midiFx" ? "midi_fx1" : selectedComp.key;
-            const displayName = getSlotParam(selectedSlot, `${prefix}:name`) || moduleData.module;
             const preset = getSlotParam(selectedSlot, `${prefix}:preset_name`) ||
                           getSlotParam(selectedSlot, `${prefix}:preset`) || "";
-            infoLine = preset ? `${displayName} (${truncateText(preset, 8)})` : displayName;
+            infoLine = preset;
         } else {
             infoLine = "(empty)";
         }
