@@ -205,7 +205,7 @@ function drawBankA() {
     clear_screen(); drawSampleName();
     print(0, 13, 'Pad ' + (s.selectedSlice + 1), 1);
     print(0, 23, 'Str:'+fmtMs(p.startTrim)+'  End:'+fmtMs(p.endTrim), 1);
-    print(0, 33, 'Atk:'+Math.round(p.attack)+'ms', 1);
+    print(0, 33, 'Atk:'+Math.round(p.attack - 5)+'ms', 1);
     print(0, 43, 'Dec:'+Math.round(p.decay)+'ms', 1);
     print(0, 53, rangeStr().substring(0, 21), 1);
 }
